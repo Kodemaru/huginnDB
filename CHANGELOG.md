@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Window controls in a floating tab or Pulse window sat on the left.** The
+  minimise, maximise and close buttons were drawn right next to the logo
+  instead of at the right edge, because those windows' only title-bar content is
+  the centred caption, which takes no room in the row. The title bar now fills
+  the row itself, so the buttons land on the right in every window.
+- **The query panel never opened in a floating tab window.** Its button kept
+  spinning forever: the window never connects (it reuses the main window's open
+  pool), so nothing opened the schema cache for its connection and every column
+  read it made was discarded as stale. The window now opens that cache before
+  the tab mounts.
+
 ## [1.31.0] — 2026-10-01
 
 ### Added

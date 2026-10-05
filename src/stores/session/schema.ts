@@ -187,6 +187,20 @@ interface SchemaState {
    * should cost the badge and nothing else.
    */
   loadDatabaseSizes: (connectionId: string) => Promise<void>;
+  /**
+   * Open an empty slice for `connectionId` without fetching anything — a
+   * no-op when one already exists.
+   *
+   * The per-table loaders drop their answer when there is no slice, on
+   * purpose: that is how a response outliving a `drop` avoids resurrecting a
+   * disconnected connection. In the main window the slice is always there
+   * first, because connecting runs `refresh`. A detached tab window never
+   * connects — the pool is already open in the shared backend — so nothing
+   * opened its slice, every `loadColumns` answer was thrown away, and the
+   * table's query panel button spun forever. A window that hosts a tab for a
+   * connection it did not open calls this first.
+   */
+  ensure: (connectionId: string) => void;
   /** Drop all cached data for `connectionId` (called on disconnect). */
   drop: (connectionId: string) => void;
   /**
@@ -538,6 +552,12 @@ export const useSchema = create<SchemaState>((set, get) => ({
         },
       };
     });
+  },
+  ensure: (connectionId) => {
+    if (get().byConnection[connectionId]) return;
+    set((state) => ({
+      byConnection: { ...state.byConnection, [connectionId]: emptyState() },
+    }));
   },
   drop: (connectionId) => {
     set((state) => {

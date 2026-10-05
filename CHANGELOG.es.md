@@ -8,6 +8,20 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ## [Sin publicar]
 
+### Corregido
+
+- **Los controles de ventana de una pestaña flotante o de Pulse salían a la
+  izquierda.** Los botones de minimizar, maximizar y cerrar se dibujaban pegados
+  al logo en vez de en el borde derecho, porque el único contenido de la barra
+  de título de esas ventanas es el título centrado, que no ocupa sitio en la
+  fila. Ahora la barra de título rellena la fila por sí misma y los botones
+  quedan a la derecha en todas las ventanas.
+- **El panel de consulta nunca se abría en una pestaña flotante.** Su botón se
+  quedaba cargando para siempre: la ventana no conecta (reutiliza el pool que ya
+  tiene abierto la principal), así que nadie abría la caché de esquema de su
+  conexión y cada lectura de columnas que hacía se descartaba por obsoleta.
+  Ahora la ventana abre esa caché antes de montar la pestaña.
+
 ## [1.31.0] — 2026-10-01
 
 ### Añadido
