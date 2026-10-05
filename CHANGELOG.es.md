@@ -8,6 +8,8 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ## [Sin publicar]
 
+## [1.31.1] — 2026-10-05
+
 ### Corregido
 
 - **Los controles de ventana de una pestaña flotante o de Pulse salían a la

@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.31.1] — 2026-10-05
+
 ### Fixed
 
 - **Window controls in a floating tab or Pulse window sat on the left.** The
