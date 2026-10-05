@@ -44,6 +44,7 @@ import { MongoIndexesTab } from "@/components/indexes/MongoIndexesTab";
 import { SecurityTab } from "@/components/schema/SecurityTab";
 import { useTabs } from "@/stores/session/tabs";
 import { useConnections } from "@/stores/session/connections";
+import { useSchema } from "@/stores/session/schema";
 import {
   usePreferences,
 } from "@/stores/preferences/preferences";
@@ -153,7 +154,13 @@ export function DetachedTabWindow() {
     void useConnections.getState().refresh();
     const label = getCurrentWindow().label;
     void api.takeDetachedTabIntent(label).then((payload) => {
-      if (payload) useTabs.getState().replaceAll([payload], payload.id);
+      if (payload) {
+        // Before the tab mounts: this window never connects, so nothing else
+        // opens the schema slice its column/index loads write into — see
+        // `useSchema.ensure`.
+        useSchema.getState().ensure(payload.connectionId);
+        useTabs.getState().replaceAll([payload], payload.id);
+      }
       setTab(payload);
     });
   }, []);

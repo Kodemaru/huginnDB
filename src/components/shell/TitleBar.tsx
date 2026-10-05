@@ -62,7 +62,17 @@ export function TitleBar({ children }: { children: ReactNode }) {
           className="mr-1.5 h-4 w-4 shrink-0"
         />
       )}
-      {children}
+      {/* The caller's content fills the row on its own, so the caption
+          buttons always land on the right edge. Without it a window whose only
+          child is the absolutely positioned `WindowCaption` (a floating tab,
+          Pulse) gave the row no width at all and the buttons sat next to the
+          logo. A drag region itself, since it now covers the empty bar. */}
+      <div
+        data-tauri-drag-region
+        className="flex min-w-0 flex-1 items-center self-stretch"
+      >
+        {children}
+      </div>
       {native ? <span className="w-2 shrink-0" /> : <WindowControls />}
     </header>
   );

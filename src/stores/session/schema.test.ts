@@ -55,8 +55,9 @@ function table(name: string): TableInfo {
  *
  * The per-table loaders bail without reporting when there is no slice — the
  * connection was dropped and the failure describes a pool that is gone — so a
- * test for their reporting has to start from a connection that exists, which
- * is also the only state they are ever called in.
+ * test for their reporting has to start from a connection that exists. That
+ * is the state the main window calls them in; a detached tab window opens its
+ * slice with `ensure` first (see the `ensure` tests).
  */
 function seed(id: string, over: Partial<ConnectionSchema> = {}) {
   useSchema.setState({
@@ -148,6 +149,33 @@ describe("refresh", () => {
     // And the slice must not be resurrected — a poisoned slice with
     // `initialized: true` is what no automatic path would ever refresh again.
     expect(useSchema.getState().byConnection.c1).toBeUndefined();
+  });
+});
+
+describe("ensure", () => {
+  it("lets a window that never connected keep its column loads", async () => {
+    // A detached tab window: no `refresh` ever ran here, so without `ensure`
+    // the answer is dropped as stale and the query panel waits forever.
+    const cols: ColumnInfo[] = [
+      { name: "id", data_type: "int", nullable: false } as ColumnInfo,
+    ];
+    listColumns.mockResolvedValue(cols);
+
+    await useSchema.getState().loadColumns("c1", undefined, "users");
+    expect(useSchema.getState().byConnection.c1).toBeUndefined();
+
+    useSchema.getState().ensure("c1");
+    await useSchema.getState().loadColumns("c1", undefined, "users");
+    expect(
+      useSchema.getState().byConnection.c1.columns[tableKey("", "users")],
+    ).toBe(cols);
+  });
+
+  it("leaves an existing slice alone", () => {
+    seed("c1", { tables: [table("users")] });
+    const before = useSchema.getState().byConnection.c1;
+    useSchema.getState().ensure("c1");
+    expect(useSchema.getState().byConnection.c1).toBe(before);
   });
 });
 
