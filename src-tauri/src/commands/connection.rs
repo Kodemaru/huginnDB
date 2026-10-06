@@ -941,12 +941,21 @@ pub(crate) async fn connect_inner(
     // policy's `dbUser`, or their own choice — with their own password.
     let profile = crate::credentials::effective_profile(&state.policy, &profile);
 
+    // Held until this function returns, across the connect below: a second
+    // opener of the same id waits here and then takes the reuse path instead
+    // of dialling a second pool. See `AppState::open_lock`.
+    let open_lock = state.open_lock(&id);
+    let _opening = open_lock.lock().await;
+
     // Idempotent: a second `connect` for an already-active id — e.g. a
     // secondary window connecting to the same profile the main window
     // already opened — must NOT fall through to `ActiveConnections::insert`,
     // whose replace semantics would tear down the live pool (and any SSH
     // tunnel) out from under the window that's using it. Reuse it instead.
     if state.connections.read().contains(&id) {
+        if let Some(label) = window_label {
+            state.connections.write().hold(&id, label);
+        }
         // A person connecting to a profile the MCP connector already opened
         // *adopts* it: from now on a window shows it, so the reaper must stop
         // treating it as disposable and the heartbeat the bridge path skipped
@@ -1088,6 +1097,7 @@ pub(crate) async fn connect_inner(
                     _keepalive: keepalive,
                     _endpoint: grant,
                     origin,
+                    holders: window_label.map(str::to_string).into_iter().collect(),
                     ..active
                 },
             );
@@ -1147,13 +1157,32 @@ pub async fn disconnect(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
+    close_connection(&app, state.inner(), Some(window.label()), &id, "disconnect").await;
+    Ok(())
+}
+
+/// Close the connection `id` and everything hanging off it, and tell every
+/// window. The body of [`disconnect`], shared with the close no person asked
+/// for in so many words: the last window using a connection going away
+/// ([`release_window`]).
+///
+/// `reason` is the Console line, so the log says *why* a connection closed —
+/// "the last window using it closed" reads very differently from "disconnect"
+/// when someone is working out where their connection went.
+pub(crate) async fn close_connection(
+    app: &AppHandle,
+    state: &AppState,
+    window_label: Option<&str>,
+    id: &str,
+    reason: &str,
+) {
     // Drop the session-cached secret for this profile (children reuse the
     // parent's entry, so a single remove covers them).
-    state.session_secrets.write().remove(&id);
-    let removed = state.connections.write().remove(&id);
+    state.session_secrets.write().remove(id);
+    let removed = state.connections.write().remove(id);
     // Sweep synthetic children first, so the parent's tunnel (which they ride
     // on) is still up while they close.
-    let children = crate::pool_reaper::close_children(state.inner(), &id).await;
+    let children = crate::pool_reaper::close_children(state, id).await;
     if let Some(active) = &removed {
         close_pool(&active.pool, PoolOwnership::Owned, CLOSE_TIMEOUT).await;
     }
@@ -1167,23 +1196,71 @@ pub async fn disconnect(
             .find(|p| p.id == id)
             .map(|p| p.driver)
             .unwrap_or(Driver::Sqlite);
-        log_connection(
-            &app,
-            Some(window.label()),
-            &id,
-            driver,
-            "disconnect",
-            None,
-            None,
-        );
+        log_connection(app, window_label, id, driver, reason, None, None);
         let _ = app.emit(
             CONNECTION_CLOSED_EVENT,
             ConnectionSyncPayload {
-                connection_id: id.clone(),
+                connection_id: id.to_string(),
             },
         );
     }
-    Ok(())
+}
+
+/// A window was destroyed: forget it, and close every connection a person
+/// opened that no remaining window is using.
+///
+/// Called from the global `WindowEvent::Destroyed` handler for every window,
+/// the main one included. Closing the main window while a secondary one still
+/// shows a connection keeps that connection, because the secondary window is
+/// still holding it. See [`crate::state::ActivePool::holders`].
+pub async fn release_window(app: &AppHandle, label: &str) {
+    let state = app.state::<AppState>();
+    let orphaned = state.connections.write().release_window(label);
+    for id in orphaned {
+        close_connection(
+            app,
+            state.inner(),
+            Some(label),
+            &id,
+            "disconnect: the last window using this connection closed",
+        )
+        .await;
+    }
+}
+
+/// Close every pool, gracefully and all at once, as the app exits.
+///
+/// Without this the pools were simply dropped with the process. The operating
+/// system tears the sockets down, which a server on the same LAN notices at
+/// once — but a server behind an SSH tunnel or a connection pooler only finds
+/// out when its own timeouts fire, and until then those sessions keep counting
+/// against its connection limit after HuginnDB is gone. Views close first,
+/// while their parents' tunnels are still up. Each close is bounded by
+/// [`CLOSE_TIMEOUT`] and the whole sweep by `budget`, because nobody should
+/// wait on a closing app for a server that has stopped answering.
+pub async fn close_all_pools(state: &AppState, budget: Duration) {
+    let all = state.connections.write().take_all_views_first();
+    let (views, parents): (Vec<_>, Vec<_>) = all
+        .into_iter()
+        .partition(|(id, _)| crate::state::is_database_view(id));
+    let sweep = async {
+        futures_util::future::join_all(
+            views
+                .iter()
+                .map(|(_, a)| close_pool(&a.pool, PoolOwnership::BorrowedView, CLOSE_TIMEOUT)),
+        )
+        .await;
+        futures_util::future::join_all(
+            parents
+                .iter()
+                .map(|(_, a)| close_pool(&a.pool, PoolOwnership::Owned, CLOSE_TIMEOUT)),
+        )
+        .await;
+    };
+    let _ = tokio::time::timeout(budget, sweep).await;
+    // Tunnels, keepalives and budget grants are released as these drop.
+    drop(views);
+    drop(parents);
 }
 
 /// Close and forget one synthetic per-database view, logging why.
@@ -1335,6 +1412,11 @@ async fn open_database_view_inner(
     database: &str,
 ) -> AppResult<String> {
     let child_id = database_view_id(parent_id, database);
+    // Same single-flight as `connect_inner`, keyed by the view: the tree's
+    // expand effect, a context-menu action and the bridge can all ask for the
+    // same database at once.
+    let open_lock = state.open_lock(&child_id);
+    let _opening = open_lock.lock().await;
     if state.connections.read().get(&child_id).is_some() {
         return Ok(child_id);
     }
@@ -2182,6 +2264,15 @@ pub async fn open_tab_window(
     title: String,
 ) -> AppResult<String> {
     let label = format!("tabwin-{}", Uuid::new_v4());
+    // The tab's connection is held by this window too: it never connects (it
+    // borrows the pool its source window opened), so without this the source
+    // window closing would close the pool under a tab that is still open.
+    if let Some(connection_id) = tab.get("connectionId").and_then(|v| v.as_str()) {
+        app.state::<AppState>()
+            .connections
+            .write()
+            .hold(connection_id, &label);
+    }
     app.state::<AppState>()
         .detached_tab_intents
         .write()
@@ -2227,6 +2318,11 @@ pub async fn open_pulse_window(
     title: String,
 ) -> AppResult<String> {
     let label = format!("pulsewin-{}", Uuid::new_v4());
+    // Held for the same reason as a detached tab's: see `open_tab_window`.
+    app.state::<AppState>()
+        .connections
+        .write()
+        .hold(&connection_id, &label);
     app.state::<AppState>()
         .pulse_window_intents
         .write()

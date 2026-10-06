@@ -785,6 +785,24 @@ pub struct ActivePool {
     /// Who asked for this pool. Decides whether the reaper may close it —
     /// see [`PoolOrigin`].
     pub origin: PoolOrigin,
+    /// Labels of the windows using this connection right now.
+    ///
+    /// Every window shares this one process and this one map, so a window
+    /// closing used to release nothing: a connection opened from a secondary
+    /// window outlived it, invisible (no other window lists a connection it
+    /// did not open itself), unreapable (top-level pools a person opened are
+    /// never reaped) and kept awake by its keepalive — one socket and possibly
+    /// an SSH tunnel per connection, until the app exited. The same shape as
+    /// gotcha #67, for windows instead of the MCP bridge.
+    ///
+    /// A window joins when it connects or reuses the connection, and a
+    /// detached tab or Pulse window joins when it is created for one. When the
+    /// last of them is destroyed the pool is closed (see
+    /// [`ActiveConnections::release_window`]). Empty on every pool a window did
+    /// not open — `::db::` views, which follow their parent, and bridge pools,
+    /// which the reaper owns — and an empty set never triggers a close by
+    /// itself; only a window *leaving* does.
+    pub holders: std::collections::HashSet<String>,
 }
 
 impl ActivePool {
@@ -807,6 +825,7 @@ impl ActivePool {
             _endpoint: None,
             last_used: Arc::new(std::sync::atomic::AtomicU64::new(now_millis())),
             origin: PoolOrigin::User,
+            holders: std::collections::HashSet::new(),
         }
     }
 
@@ -895,7 +914,8 @@ impl ActiveConnections {
     /// Every synthetic per-database child pool (any parent) idle for at least
     /// `ttl_millis` as of `now`. Top-level pools are never returned: they
     /// represent a connection the user explicitly opened and are only closed by
-    /// an explicit disconnect.
+    /// an explicit disconnect, or when the last window using them closes (see
+    /// [`Self::release_window`]) — never for being idle.
     pub fn idle_children(&self, now: u64, ttl_millis: u64) -> Vec<String> {
         self.inner
             .iter()
@@ -967,6 +987,52 @@ impl ActiveConnections {
         }
         active.origin = PoolOrigin::User;
         Some((active.pool.clone(), active.last_used.clone()))
+    }
+
+    /// Record that the window `label` is using the top-level connection `id`.
+    ///
+    /// A `::db::` view id is folded to its parent: a window showing a
+    /// database is holding the connection that database lives on. Returns
+    /// whether there was a pool to hold.
+    pub fn hold(&mut self, id: &str, label: &str) -> bool {
+        let parent = parent_connection_id(id);
+        match self.inner.get_mut(parent) {
+            Some(active) => {
+                active.holders.insert(label.to_string());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forget the window `label` everywhere, and return the top-level
+    /// connections a **person** opened that no window is using any more.
+    ///
+    /// The caller closes them; this only decides, without I/O, so the rule is
+    /// testable on its own. Only a pool that *lost* its last holder here is
+    /// returned — one that never had any (a bridge pool, a pool from before a
+    /// window could be recorded) is not this window's to close.
+    pub fn release_window(&mut self, label: &str) -> Vec<String> {
+        let mut orphaned: Vec<String> = self
+            .inner
+            .iter_mut()
+            .filter(|(id, _)| !is_database_view(id))
+            .filter_map(|(id, active)| {
+                let was_held = active.holders.remove(label);
+                (was_held && active.holders.is_empty() && active.origin == PoolOrigin::User)
+                    .then(|| id.clone())
+            })
+            .collect();
+        orphaned.sort();
+        orphaned
+    }
+
+    /// Every id in the map, views first, for the exit sweep: a view rides on
+    /// its parent's SSH tunnel, so it has to close while that tunnel is up.
+    pub fn take_all_views_first(&mut self) -> Vec<(String, ActivePool)> {
+        let mut all: Vec<(String, ActivePool)> = self.inner.drain().collect();
+        all.sort_by_key(|(id, _)| !is_database_view(id));
+        all
     }
 
     /// Give a pool the heartbeat it did not have. Only [`Self::adopt_from_bridge`]
@@ -1183,6 +1249,8 @@ pub struct AppState {
     /// `policy::install` on it at startup, so a test never inherits the policy
     /// of the machine it runs on.
     pub policy: crate::policy::SharedPolicy,
+    /// One lock per connection id being opened. See [`AppState::open_lock`].
+    pub open_locks: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl AppState {
@@ -1222,6 +1290,27 @@ impl AppState {
     #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     pub fn new() -> Self {
         Self::new_with_args(StartupArgs::default())
+    }
+
+    /// The lock that serialises opening the pool for `id`.
+    ///
+    /// Opening checks the map, then awaits a connect, then inserts — and with
+    /// nothing held across that await, two openers of the same id (a window
+    /// and the MCP bridge, two sidecars, the tree's expand effect and a
+    /// context-menu action) both found it absent and both connected. The second
+    /// insert replaced the first pool with a bare `Drop` rather than an awaited
+    /// close, so the server briefly saw both. Openers now take this lock
+    /// *before* the check, so the second one finds the first one's pool.
+    ///
+    /// Entries are never removed: there is one per profile and per database
+    /// view ever opened, a few bytes each, and removing one safely would need
+    /// to know nobody is waiting on it.
+    pub fn open_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.open_locks
+            .lock()
+            .entry(id.to_string())
+            .or_default()
+            .clone()
     }
 
     /// Same as [`Self::new`] but attaches pre-parsed CLI arguments so the
@@ -1277,6 +1366,7 @@ impl AppState {
             ai_probe: Arc::new(RwLock::new(None)),
             ai_turns: Arc::new(RwLock::new(HashMap::new())),
             policy: crate::policy::unmanaged(),
+            open_locks: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -1294,6 +1384,106 @@ mod tests {
                 .connect_lazy("sqlite::memory:")
                 .expect("lazy pool construction does not touch the filesystem"),
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Which windows hold a connection, and what closing one releases
+    // -----------------------------------------------------------------------
+
+    fn held(by: &[&str]) -> ActivePool {
+        ActivePool {
+            holders: by.iter().map(|s| s.to_string()).collect(),
+            ..ActivePool::bare(dummy_pool())
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_the_only_window_using_a_connection_releases_it() {
+        let mut conns = ActiveConnections::default();
+        conns.insert("p".into(), held(&["win-1"]));
+        assert_eq!(conns.release_window("win-1"), vec!["p".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_connection_another_window_still_uses_survives() {
+        let mut conns = ActiveConnections::default();
+        conns.insert("p".into(), held(&["main", "win-1"]));
+        assert!(conns.release_window("win-1").is_empty());
+        // …until that one goes too.
+        assert_eq!(conns.release_window("main"), vec!["p".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_window_that_never_held_a_connection_releases_nothing() {
+        // A pool no window ever held (the bridge's, or one opened headless)
+        // is not any window's to close.
+        let mut conns = ActiveConnections::default();
+        conns.insert("p".into(), ActivePool::bare(dummy_pool()));
+        conns.insert("q".into(), held(&["main"]));
+        assert!(conns.release_window("win-1").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bridge_pool_is_left_to_the_reaper() {
+        let mut conns = ActiveConnections::default();
+        conns.insert(
+            "p".into(),
+            ActivePool {
+                origin: PoolOrigin::Bridge,
+                ..held(&["win-1"])
+            },
+        );
+        assert!(conns.release_window("win-1").is_empty());
+    }
+
+    #[tokio::test]
+    async fn holding_a_database_view_holds_its_connection() {
+        // A detached tab on `p::db::sales` keeps `p` itself alive.
+        let mut conns = ActiveConnections::default();
+        conns.insert("p".into(), held(&["main"]));
+        conns.insert("p::db::sales".into(), ActivePool::bare(dummy_pool()));
+        assert!(conns.hold("p::db::sales", "tabwin-1"));
+        assert!(conns.release_window("main").is_empty());
+        assert_eq!(conns.release_window("tabwin-1"), vec!["p".to_string()]);
+        // Nothing to hold when the connection is not open.
+        assert!(!conns.hold("absent", "tabwin-2"));
+    }
+
+    #[tokio::test]
+    async fn the_exit_sweep_takes_views_before_their_parents() {
+        let mut conns = ActiveConnections::default();
+        conns.insert("p".into(), held(&["main"]));
+        conns.insert("p::db::a".into(), ActivePool::bare(dummy_pool()));
+        conns.insert("q".into(), held(&["main"]));
+        conns.insert("q::db::b".into(), ActivePool::bare(dummy_pool()));
+        let order: Vec<bool> = conns
+            .take_all_views_first()
+            .iter()
+            .map(|(id, _)| is_database_view(id))
+            .collect();
+        assert_eq!(order, vec![true, true, false, false]);
+        assert!(conns.ids().is_empty());
+    }
+
+    /// Two openers of one id must not both find it absent: the second waits
+    /// for the first and then sees its pool.
+    #[tokio::test]
+    async fn the_open_lock_serialises_openers_of_one_id() {
+        let state = Arc::new(AppState::new());
+        let first = state.open_lock("p");
+        let guard = first.lock().await;
+        let s2 = Arc::clone(&state);
+        let second = tokio::spawn(async move {
+            let lock = s2.open_lock("p");
+            let _g = lock.lock().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!second.is_finished(), "the second opener must wait");
+        // A different id is not blocked by it.
+        let other = state.open_lock("q");
+        assert!(other.try_lock().is_ok());
+        drop(guard);
+        second.await.unwrap();
     }
 
     /// Every `profiles.json` on every existing install predates the two AI

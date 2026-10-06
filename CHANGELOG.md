@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **Closing a window left its connections open.** A connection opened in a
+  secondary window stayed open on the server after that window was closed,
+  until HuginnDB itself exited. No remaining window listed it, so nothing
+  could close it. A connection now closes when the last window using it does,
+  and a floating tab or Pulse window counts as using the connection it shows.
+- **Quitting HuginnDB didn't close its connections properly.** Open
+  connections were simply dropped when the app exited. A server behind an SSH
+  tunnel or a connection pooler could go on counting those sessions against
+  its connection limit until its own timeouts fired. HuginnDB now closes them
+  properly on the way out, waiting at most three seconds.
+- **The same connection could be opened twice at once.** Two requests for one
+  connection or database arriving together could each open a pool, briefly
+  holding twice the connections against the server. This could happen with a
+  window and the MCP connector, or with the tree expanding a database while a
+  menu action on it ran. The second request now waits for the first and
+  reuses its pool.
+
 - **An expanded database showed a blank subtree while it loaded.** The schema
   tree now shows placeholder rows until a database's tables arrive, and a
   spinner on the database's own row while it is being opened or refreshed, so
