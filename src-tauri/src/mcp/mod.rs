@@ -667,10 +667,11 @@ mod args {
 #[derive(Clone)]
 pub struct Huginn {
     state: Arc<AppState>,
-    /// Live connection to a running desktop app, when the bridge is enabled
-    /// and reachable. `None` means this process owns its own pools, exactly as
-    /// it did before the bridge existed.
-    bridge: Option<Arc<crate::bridge::client::BridgeClient>>,
+    /// Link to a running desktop app, when the bridge is enabled and
+    /// reachable — attached at startup or on a later call (see
+    /// [`crate::bridge::client::BridgeSlot`]). While it has none, this process
+    /// owns its own pools, exactly as it did before the bridge existed.
+    bridge: Arc<crate::bridge::client::BridgeSlot>,
     config: Arc<Config>,
     tool_router: ToolRouter<Self>,
 }
@@ -962,7 +963,7 @@ impl Huginn {
     fn new(
         state: Arc<AppState>,
         config: Arc<Config>,
-        bridge: Option<Arc<crate::bridge::client::BridgeClient>>,
+        bridge: Arc<crate::bridge::client::BridgeSlot>,
     ) -> Self {
         let mut tool_router = Self::tool_router();
         if config.read_only {
@@ -988,7 +989,7 @@ impl Huginn {
     /// is arguably the better provenance anyway.
     async fn call(&self, request: BridgeRequest, audit: bool) -> AppResult<serde_json::Value> {
         use crate::bridge::client::BridgeError;
-        if let Some(bridge) = &self.bridge {
+        if let Some(bridge) = self.bridge.get().await {
             match bridge.call(&request).await {
                 Ok(value) => {
                     if audit {
@@ -1028,6 +1029,40 @@ impl Huginn {
         crate::bridge::exec::execute(&self.state, sink, &request).await
     }
 
+    /// Ask the desktop app to open `id`, when a bridge is attached.
+    ///
+    /// `Some` is the app's answer, success or failure. `None` means there is
+    /// no app to ask — no bridge, or one that turned out to be unreachable —
+    /// and the caller opens a pool of its own.
+    ///
+    /// Not through [`Self::call`]: its fallback for an unreachable app is to
+    /// run the request locally, and `bridge::exec::execute` refuses
+    /// `EnsureConnected` by design (opening a pool differs per side). So when
+    /// the app went away, every tool call — each one starts with this — failed
+    /// with "ensure_connected must be handled by the caller", even though
+    /// everything around it promised a fall back to local pools. An unreachable
+    /// app is exactly the safe case for falling back: nothing was sent.
+    async fn ensure_via_bridge(&self, id: &str) -> Option<AppResult<()>> {
+        use crate::bridge::client::BridgeError;
+        let bridge = self.bridge.get().await?;
+        let request = BridgeRequest::EnsureConnected {
+            connection_id: id.to_string(),
+        };
+        match bridge.call(&request).await {
+            Ok(_) => Some(Ok(())),
+            Err(BridgeError::Remote(message)) => {
+                Some(Err(crate::error::AppError::Bridged(message)))
+            }
+            Err(BridgeError::Unreachable(why)) => {
+                eprintln!(
+                    "[huginndb-mcp] the HuginnDB app is no longer serving the bridge ({why}); {}",
+                    format_args!("opening this process's own pool for {id}")
+                );
+                None
+            }
+        }
+    }
+
     /// Ensure a live pool exists for `id`, opening one lazily on first use.
     ///
     /// Enforces the allowlist, resolves the password (and any SSH secret) from
@@ -1061,19 +1096,8 @@ impl Huginn {
         // to open the connection and keep none of our own. The local
         // `contains` check below is deliberately *not* consulted first — this
         // process holds no pool in that mode, so it would always miss.
-        if self.bridge.is_some() {
-            match self
-                .call(
-                    BridgeRequest::EnsureConnected {
-                        connection_id: id.to_string(),
-                    },
-                    false,
-                )
-                .await
-            {
-                Ok(_) => return Ok(()),
-                Err(e) => return Err(e),
-            }
+        if let Some(answer) = self.ensure_via_bridge(id).await {
+            return answer;
         }
         if self.state.connections.read().contains(id) {
             return Ok(());
@@ -2328,13 +2352,34 @@ fn spawn_idle_pool_reaper(state: Arc<AppState>) {
         loop {
             tokio::time::sleep(POOL_SWEEP_INTERVAL).await;
             let ttl_millis = POOL_IDLE_TTL.as_millis() as u64;
-            let victims = state
+            let mut victims = state
                 .connections
                 .read()
                 .idle_pools(crate::state::now_millis(), ttl_millis);
             if victims.is_empty() {
                 continue;
             }
+            // A parent goes with its views, and they go first. A MongoDB view
+            // shares its parent's client: reaping only the parent shut that
+            // client down and left a view in the map that
+            // `resolve_mongo_database_view` would keep handing out, dead. And a
+            // SQL view rides its parent's SSH tunnel, which has to be up while
+            // the view closes.
+            {
+                let conns = state.connections.read();
+                let parents: Vec<String> = victims
+                    .iter()
+                    .filter(|id| !crate::state::is_database_view(id))
+                    .cloned()
+                    .collect();
+                for parent in parents {
+                    let prefix = crate::state::database_view_prefix(&parent);
+                    victims.extend(conns.ids().into_iter().filter(|id| id.starts_with(&prefix)));
+                }
+            }
+            victims.sort();
+            victims.dedup();
+            victims.sort_by_key(|id| !crate::state::is_database_view(id));
             // Remove under the lock, close outside it — `close_pool` awaits,
             // and a `parking_lot` guard must never be held across an await.
             let removed: Vec<_> = {
@@ -2432,14 +2477,8 @@ pub async fn serve() -> anyhow::Result<()> {
     // ignores the snapshot and re-reads `mcp_exposed` per request — that is
     // what `defer_exposure` asks it to do.
     let allowed: Vec<String> = exposed.iter().map(|p| p.id.clone()).collect();
-    let bridge = crate::bridge::client::BridgeClient::connect(allowed, config.pinned.is_none())
-        .await
-        .map(Arc::new);
-    if bridge.is_some() {
-        eprintln!(
-            "[huginndb-mcp] attached to the running HuginnDB app: it owns the connection pools,              and this session's activity appears in its Console"
-        );
-    }
+    let bridge =
+        Arc::new(crate::bridge::client::BridgeSlot::new(allowed, config.pinned.is_none()).await);
     // The local reaper only matters when we own pools. With the bridge up it
     // has nothing to sweep, but the app can go away mid-session and this
     // process falls back — so it stays armed either way.
@@ -2722,9 +2761,44 @@ mod tests {
                 saw_allow_writes: false,
             }),
             // No bridge: these tests exercise the local path, which is what a
-            // sidecar runs when no desktop app is serving.
-            None,
+            // sidecar runs when no desktop app is serving. `never`, not a slot
+            // that has not attached yet — that one would find a developer's
+            // running app and send these requests to it.
+            Arc::new(crate::bridge::client::BridgeSlot::never()),
         )
+    }
+
+    /// The bug this guards: with the bridge attached and the app gone, every
+    /// tool call failed with "ensure_connected must be handled by the caller"
+    /// instead of falling back to this process's own pool, as everything around
+    /// it promised. An app that quit must hand the decision back (`None`), so
+    /// `ensure_connected` goes on to open a local pool.
+    ///
+    /// Aimed at `ensure_via_bridge` rather than `ensure_connected` because the
+    /// latter checks exposure against the real `profiles.json` (gotcha #52).
+    #[tokio::test]
+    async fn an_app_that_quit_hands_the_open_back_to_this_process() {
+        use crate::bridge::client::test_support::{fake_app, AfterHello};
+        use crate::bridge::client::{BridgeClient, BridgeSlot};
+        // Before giving up on the app the call re-reads the discovery file; on
+        // a machine where HuginnDB is running it would reach that real app.
+        // Never send a test's requests there. (`--features canary` points the
+        // lookup at a directory no running app publishes into.)
+        if crate::bridge::read_discovery().is_some() {
+            eprintln!("skipped: a real HuginnDB bridge is published on this machine");
+            return;
+        }
+        let port = fake_app(AfterHello::Quit).await;
+        let client = BridgeClient::connect_to_for_test(port, "t").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let huginn = Huginn {
+            bridge: Arc::new(BridgeSlot::attached_for_test(client)),
+            ..huginn_with_policy("t-fallback", McpWritePolicy::ReadOnly, false)
+        };
+        assert!(
+            huginn.ensure_via_bridge("t-fallback").await.is_none(),
+            "an unreachable app must hand the open back, not fail it"
+        );
     }
 
     #[test]

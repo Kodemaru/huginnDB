@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **The MCP connector stopped working when HuginnDB was closed.** With the
+  bridge on, the connector is meant to fall back to its own connections when
+  the app isn't there to lend it one. It didn't: every tool call failed until
+  the AI session was restarted. It now falls back as intended.
+- **The first AI request after restarting HuginnDB failed.** A connector
+  attached to the app kept using the old, already-closed link and only noticed
+  once that request had failed. It now checks first and reconnects before
+  sending.
+- **A connector started while HuginnDB was closed never used the app's
+  connections.** It checked for the app only once, at start-up. AI sessions
+  often stay open for days, so most connectors were opening connections of
+  their own for good. A connector now keeps looking for the app (at most every
+  30 seconds) and switches to the app's connections when it finds it.
+- **Pulse kept the MCP connector's connections open forever.** For a
+  connection with Pulse turned on, its once-a-minute sample counted as
+  activity, so a connection opened for the MCP connector was never closed for
+  being idle. Samples no longer count.
+
 - **Connections through an SSH tunnel dropped after a while and never came
   back on their own.**
   - The tunnel sent no keepalive of its own, so a firewall or router that

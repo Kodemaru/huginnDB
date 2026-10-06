@@ -147,6 +147,30 @@ impl BridgeClient {
         let payload = serde_json::to_vec(request)
             .map_err(|e| BridgeError::Unreachable(format!("could not encode request: {e}")))?;
 
+        // Find out whether the app already hung up *before* sending anything.
+        //
+        // The reconnect below only runs when the write fails, and a write to a
+        // socket whose peer has closed usually succeeds: the kernel accepts the
+        // bytes, and the error only shows up on the next operation. So the
+        // first call after the app restarted wrote into the old connection,
+        // read EOF, and failed as `Remote` ("closed the connection before
+        // answering") — once per app restart, on whatever the AI asked first.
+        // The protocol never sends unsolicited lines, so a read side that is
+        // ready before we have written anything can only be EOF, an error, or
+        // a desync. Any of those means the connection is unusable, and since
+        // nothing has been sent yet, replacing it is as safe as the reconnect
+        // below.
+        if connection_is_stale(&mut guard).await {
+            match self.reconnect().await {
+                Some(fresh) => *guard = fresh,
+                None => {
+                    return Err(BridgeError::Unreachable(
+                        "the HuginnDB app closed the bridge connection (request not sent)".into(),
+                    ))
+                }
+            }
+        }
+
         // One reconnect attempt, but only for a request we have not sent yet:
         // an MCP client keeps a sidecar alive for days, across app restarts, so
         // the *first* call after the app came back would otherwise always fail.
@@ -224,6 +248,109 @@ impl BridgeClient {
     }
 }
 
+/// Whether the read side of an idle connection already has something on it,
+/// which in a strictly request-then-reply protocol means it is dead.
+///
+/// A zero-length timeout still polls the read once — `tokio::time::timeout`
+/// polls its future before it looks at the deadline — so this is a
+/// non-blocking peek, not a wait. `Lines::next_line` is cancellation-safe, so
+/// abandoning the pending read leaves the stream intact.
+async fn connection_is_stale(connection: &mut Connection) -> bool {
+    // `Err` is the timeout firing: still pending, nothing to read, so the
+    // connection is idle and alive. Anything that *resolved* is the problem.
+    timeout(Duration::ZERO, connection.reader.next_line())
+        .await
+        .is_ok()
+}
+
+/// The sidecar's link to the desktop app: attached at startup, or later.
+///
+/// A sidecar used to try once, at startup, and keep the answer for life. MCP
+/// clients keep sidecars running for days — on one machine, twelve of thirteen
+/// live sidecars had been started before the app currently running — so any
+/// session that began while the app was closed opened pools of its own for as
+/// long as it lived, however long the app had been back. Now a sidecar with no
+/// bridge tries again when it is next used, at most every [`ATTACH_RETRY`].
+/// Once attached it stays attached: [`BridgeClient::call`] already survives the
+/// app restarting.
+pub struct BridgeSlot {
+    client: std::sync::OnceLock<std::sync::Arc<BridgeClient>>,
+    last_attempt: parking_lot::Mutex<Option<std::time::Instant>>,
+    allowed: Vec<String>,
+    defer_exposure: bool,
+    /// `false` for a slot that must never attach — see [`Self::never`].
+    enabled: bool,
+}
+
+/// How often a sidecar with no bridge looks for one again.
+///
+/// Cheap when there is no app (a missing discovery file is a failed file
+/// read; a stale one is a refused loopback connect) but not free when the app
+/// is wedged ([`CONNECT_TIMEOUT`]), and a tool call should not pay that every
+/// time.
+pub const ATTACH_RETRY: Duration = Duration::from_secs(30);
+
+impl BridgeSlot {
+    /// Try to attach now; whether it worked or not, the slot keeps trying later.
+    pub async fn new(allowed: Vec<String>, defer_exposure: bool) -> Self {
+        let slot = Self {
+            client: std::sync::OnceLock::new(),
+            last_attempt: parking_lot::Mutex::new(None),
+            allowed,
+            defer_exposure,
+            enabled: true,
+        };
+        let _ = slot.get().await;
+        slot
+    }
+
+    /// A slot that never attaches: the local path, unconditionally.
+    ///
+    /// For the tests that exercise that path. A slot that merely had not
+    /// attached *yet* would look for the discovery file on its first call — and
+    /// on a developer's machine with the app open, find it, and send the test's
+    /// requests to their real app.
+    #[cfg(test)]
+    pub fn never() -> Self {
+        Self {
+            client: std::sync::OnceLock::new(),
+            last_attempt: parking_lot::Mutex::new(None),
+            allowed: Vec::new(),
+            defer_exposure: false,
+            enabled: false,
+        }
+    }
+
+    /// The bridge, attaching first if it is time to try again.
+    pub async fn get(&self) -> Option<std::sync::Arc<BridgeClient>> {
+        if let Some(client) = self.client.get() {
+            return Some(client.clone());
+        }
+        if !self.enabled {
+            return None;
+        }
+        {
+            let mut last = self.last_attempt.lock();
+            if last.is_some_and(|at| at.elapsed() < ATTACH_RETRY) {
+                return None;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        let client = BridgeClient::connect(self.allowed.clone(), self.defer_exposure).await?;
+        // Two calls racing to attach both connected; keep whichever landed
+        // first and let the other connection drop.
+        let attached = self
+            .client
+            .get_or_init(|| std::sync::Arc::new(client))
+            .clone();
+        eprintln!(
+            "[huginndb-mcp] attached to the running HuginnDB app: it owns the connection pools, \
+             and this session's activity appears in its Console"
+        );
+        Some(attached)
+    }
+}
+
 async fn write_line<T: serde::Serialize>(writer: &mut OwnedWriteHalf, value: &T) -> io::Result<()> {
     let payload = serde_json::to_vec(value).map_err(io::Error::other)?;
     write_payload(writer, &payload).await
@@ -236,4 +363,143 @@ async fn write_payload(writer: &mut OwnedWriteHalf, payload: &[u8]) -> io::Resul
     // blocking on a reply that is sitting in a buffer is a deadlock that costs
     // nothing to rule out.
     writer.flush().await
+}
+
+#[cfg(test)]
+impl BridgeClient {
+    /// Attach to an app listening on `port` with `token`, bypassing the
+    /// discovery file — for tests that stand up a fake app.
+    pub(crate) async fn connect_to_for_test(port: u16, token: &str) -> Self {
+        Self {
+            stream: Mutex::new(Self::handshake(token, port, &[], true).await.unwrap()),
+            allowed: Vec::new(),
+            defer_exposure: true,
+        }
+    }
+}
+
+#[cfg(test)]
+impl BridgeSlot {
+    /// A slot already attached to `client`, which never looks for another.
+    pub(crate) fn attached_for_test(client: BridgeClient) -> Self {
+        let slot = Self::never();
+        let _ = slot.client.set(std::sync::Arc::new(client));
+        slot
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::bridge::protocol::HelloAck;
+    use tokio::net::TcpListener;
+
+    /// What a fake app does once it has accepted the handshake.
+    pub(crate) enum AfterHello {
+        /// Hold the connection open and say nothing, like an idle healthy app.
+        Idle,
+        /// Close the connection, like an app that quit.
+        Quit,
+        /// Send a line nobody asked for, which the protocol never does.
+        Babble,
+    }
+
+    /// A one-connection stand-in for the desktop app's bridge server. Returns
+    /// its port; the task ends when the connection does.
+    pub(crate) async fn fake_app(after: AfterHello) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(read_half).lines();
+            let _hello = reader.next_line().await.unwrap();
+            write_line(
+                &mut writer,
+                &HelloAck {
+                    protocol_version: PROTOCOL_VERSION,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+            match after {
+                AfterHello::Idle => {
+                    // Keep both halves alive until the client hangs up.
+                    let _ = reader.next_line().await;
+                }
+                AfterHello::Quit => drop((reader, writer)),
+                AfterHello::Babble => {
+                    writer.write_all(b"{\"unsolicited\":true}\n").await.unwrap();
+                    let _ = reader.next_line().await;
+                }
+            }
+        });
+        port
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{fake_app, AfterHello};
+    use super::*;
+
+    async fn connected(after: AfterHello) -> Connection {
+        let port = fake_app(after).await;
+        BridgeClient::handshake("t", port, &[], true).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_idle_live_connection_is_not_stale() {
+        let mut c = connected(AfterHello::Idle).await;
+        assert!(!connection_is_stale(&mut c).await);
+        // And the peek consumed nothing: asking again gives the same answer.
+        assert!(!connection_is_stale(&mut c).await);
+    }
+
+    /// The case that made the first call after an app restart fail: the write
+    /// into the dead connection succeeds, and only the read finds out.
+    #[tokio::test]
+    async fn a_connection_the_app_closed_is_stale_before_anything_is_written() {
+        let mut c = connected(AfterHello::Quit).await;
+        // Give the FIN a moment to land.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(connection_is_stale(&mut c).await);
+    }
+
+    #[tokio::test]
+    async fn an_unsolicited_line_means_the_connection_cannot_be_trusted() {
+        let mut c = connected(AfterHello::Babble).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(connection_is_stale(&mut c).await);
+    }
+
+    /// With the app gone and no discovery file to find another, the call must
+    /// come back `Unreachable` — "never sent" — which is what licenses the
+    /// caller to fall back to a local pool.
+    #[tokio::test]
+    async fn a_call_to_an_app_that_quit_is_unreachable_not_remote() {
+        let port = fake_app(AfterHello::Quit).await;
+        let client = BridgeClient::connect_to_for_test(port, "t").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // `reconnect` reads the real discovery file; on a machine with the app
+        // running it would find it and this test would talk to that app.
+        // Skip rather than send a request to someone's real HuginnDB.
+        if crate::bridge::read_discovery().is_some() {
+            eprintln!("skipped: a real HuginnDB bridge is published on this machine");
+            return;
+        }
+        let err = client
+            .call(&BridgeRequest::IsMongo {
+                connection_id: "p".into(),
+            })
+            .await
+            .expect_err("nobody is there to answer");
+        assert!(matches!(err, BridgeError::Unreachable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_slot_that_must_never_attach_never_does() {
+        assert!(BridgeSlot::never().get().await.is_none());
+    }
 }

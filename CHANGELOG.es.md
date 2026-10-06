@@ -10,6 +10,26 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ### Corregido
 
+- **El conector MCP dejaba de funcionar al cerrar HuginnDB.** Con el puente
+  (bridge) activo, el conector debe usar sus propias conexiones cuando la app
+  no está para prestárselas. No lo hacía: todas las llamadas fallaban hasta
+  reiniciar la sesión de la IA. Ahora vuelve a sus propias conexiones como
+  estaba previsto.
+- **La primera petición de la IA tras reiniciar HuginnDB fallaba.** Un
+  conector enganchado a la app seguía usando el enlace antiguo, ya cerrado, y
+  solo se daba cuenta cuando esa petición había fallado. Ahora lo comprueba
+  antes y se reconecta antes de enviar.
+- **Un conector arrancado con HuginnDB cerrado nunca usaba las conexiones de la
+  app.** Solo buscaba la app una vez, al arrancar. Las sesiones de IA suelen
+  quedarse abiertas días, así que la mayoría de los conectores acababan
+  abriendo sus propias conexiones para siempre. Ahora el conector sigue
+  buscando la app (como mucho cada 30 segundos) y pasa a usar sus conexiones
+  cuando la encuentra.
+- **Pulse mantenía abiertas para siempre las conexiones del conector MCP.** En
+  una conexión con Pulse activado, la muestra que toma cada minuto contaba
+  como actividad, así que una conexión abierta para el conector MCP nunca se
+  cerraba por inactividad. Las muestras ya no cuentan como actividad.
+
 - **Las conexiones a través de un túnel SSH se caían pasado un rato y no
   volvían solas.**
   - El túnel no enviaba ningún keepalive propio, así que un firewall o un router
