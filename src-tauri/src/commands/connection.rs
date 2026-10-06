@@ -1542,7 +1542,15 @@ async fn open_database_view_inner(
         None,
         None,
     );
-    match open_pool(&child, &pw, ssh, known_hosts, limits).await {
+    // Ride the parent's tunnel when it has one up: no second SSH handshake per
+    // database, no second session to the bastion. A parent that is not open
+    // (a view reopened by the reaper's transparent path after a disconnect
+    // elsewhere) still dials its own, as every view used to.
+    let route = match state.connections.read().tunnel_port(parent_id) {
+        Some(port) => crate::db::pool::TunnelRoute::Through(port),
+        None => crate::db::pool::TunnelRoute::Dial(ssh),
+    };
+    match crate::db::pool::open_pool_routed(&child, &pw, route, known_hosts, limits).await {
         Ok((pool, ssh_handle)) => {
             state.connections.write().insert(
                 child_id.clone(),

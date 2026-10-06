@@ -1027,6 +1027,16 @@ impl ActiveConnections {
         orphaned
     }
 
+    /// Local port of the SSH tunnel fronting the pool `id`, if it has one.
+    /// What a per-database view dials to ride its parent's tunnel instead of
+    /// opening its own (see `db::pool::TunnelRoute::Through`).
+    pub fn tunnel_port(&self, id: &str) -> Option<u16> {
+        self.inner
+            .get(id)
+            .and_then(|active| active._ssh.as_ref())
+            .map(|tunnel| tunnel.local_port)
+    }
+
     /// Every id in the map, views first, for the exit sweep: a view rides on
     /// its parent's SSH tunnel, so it has to close while that tunnel is up.
     pub fn take_all_views_first(&mut self) -> Vec<(String, ActivePool)> {

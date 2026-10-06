@@ -643,4 +643,17 @@ export const notify = {
   progress,
   /** Dismiss one notification, or every one when called bare. */
   dismiss: (id?: string) => toast.dismiss(id),
+  /**
+   * Dismiss the card a `group` is showing, if one is still up.
+   *
+   * For a notification that has become untrue rather than merely old: a
+   * "connection lost" card carrying a Reconnect button, once the connection
+   * has come back on its own. The history entry stays — it did happen.
+   */
+  dismissGroup: (group: string) => {
+    const live = groups.get(group);
+    if (!live) return;
+    groups.delete(group);
+    toast.dismiss(live.toastId);
+  },
 };

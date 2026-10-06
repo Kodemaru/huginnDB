@@ -317,9 +317,55 @@ pub async fn open_pool(
     known_hosts: SharedKnownHosts,
     limits: PoolLimits,
 ) -> AppResult<(DbPool, Option<SshTunnelHandle>)> {
+    open_pool_routed(
+        profile,
+        password,
+        TunnelRoute::Dial(ssh_secret),
+        known_hosts,
+        limits,
+    )
+    .await
+}
+
+/// How a pool for a tunnelled profile reaches its server.
+///
+/// Ignored for a profile with no SSH tunnel.
+pub enum TunnelRoute {
+    /// Bring up a tunnel of the pool's own, authenticating with this secret.
+    /// The returned [`SshTunnelHandle`] owns it.
+    Dial(Option<String>),
+    /// Dial the local port of a tunnel that is already up — a per-database
+    /// view riding its parent connection's tunnel. Nothing is opened and no
+    /// handle is returned; the parent keeps the tunnel alive, and every
+    /// teardown path closes views before their parent for exactly this reason.
+    Through(u16),
+}
+
+/// [`open_pool`] with the tunnel decision made by the caller.
+///
+/// Exists for `open_database_view`. A per-database view used to dial an SSH
+/// tunnel of its own, so every database expanded on a tunnelled connection
+/// cost a full SSH handshake and authentication before its first query, and
+/// held a second session open to the bastion for as long as the view lived.
+/// Its parent's tunnel already reaches the same `host:port`, and each
+/// connection through it gets its own `direct-tcpip` channel, so a view now
+/// goes [`TunnelRoute::Through`] the parent's local port instead.
+pub async fn open_pool_routed(
+    profile: &ConnectionProfile,
+    password: &str,
+    route: TunnelRoute,
+    known_hosts: SharedKnownHosts,
+    limits: PoolLimits,
+) -> AppResult<(DbPool, Option<SshTunnelHandle>)> {
     // MongoDB has its own connection model (URI / SRV / tunnel rules) and is
-    // built entirely in the mongo module.
+    // built entirely in the mongo module. Its per-database views reuse the
+    // parent's client and never come through here, so only `Dial` reaches it.
     if matches!(profile.driver, Driver::Mongo) {
+        let TunnelRoute::Dial(ssh_secret) = route else {
+            return Err(AppError::InvalidInput(
+                "a MongoDB pool cannot share another pool's SSH tunnel".into(),
+            ));
+        };
         return crate::db::mongo::open_pool(profile, password, ssh_secret, known_hosts, limits)
             .await;
     }
@@ -328,8 +374,7 @@ pub async fn open_pool(
     // this one still goes through `db::ssh` — inside `mssql::open_pool`, which
     // owns the tunnel-vs-named-instance interaction.
     if matches!(profile.driver, Driver::MsSql) {
-        return crate::db::mssql::open_pool(profile, password, ssh_secret, known_hosts, limits)
-            .await;
+        return crate::db::mssql::open_pool(profile, password, route, known_hosts, limits).await;
     }
 
     // SQLite is a local file; tunnels don't apply. For network drivers,
@@ -340,17 +385,25 @@ pub async fn open_pool(
     // branch — the tunnel's *remote* port is as much a real port as the one
     // the URL names.
     let remote_port = profile.effective_port();
-    let (host, port, handle): (String, u16, Option<SshTunnelHandle>) =
-        if let (Some(tunnel), false) = (
-            profile.ssh_tunnel.as_ref(),
-            matches!(profile.driver, Driver::Sqlite),
-        ) {
-            let h = ssh::open_tunnel(tunnel, ssh_secret, &profile.host, remote_port, known_hosts)
-                .await?;
-            ("127.0.0.1".to_string(), h.local_port, Some(h))
-        } else {
-            (profile.host.clone(), remote_port, None)
-        };
+    let (host, port, handle): (String, u16, Option<SshTunnelHandle>) = if let (
+        Some(tunnel),
+        false,
+    ) = (
+        profile.ssh_tunnel.as_ref(),
+        matches!(profile.driver, Driver::Sqlite),
+    ) {
+        match route {
+            TunnelRoute::Dial(ssh_secret) => {
+                let h =
+                    ssh::open_tunnel(tunnel, ssh_secret, &profile.host, remote_port, known_hosts)
+                        .await?;
+                ("127.0.0.1".to_string(), h.local_port, Some(h))
+            }
+            TunnelRoute::Through(local_port) => ("127.0.0.1".to_string(), local_port, None),
+        }
+    } else {
+        (profile.host.clone(), remote_port, None)
+    };
 
     let url = build_url(profile, password, &host, port);
     let what = endpoint_label(profile, &host, port);
@@ -398,6 +451,57 @@ where
         .idle_timeout(Some(IDLE_TIMEOUT))
         .max_lifetime(Some(MAX_LIFETIME))
         .acquire_timeout(ACQUIRE_TIMEOUT)
+        // Replaces sqlx's own health check rather than adding to it; see
+        // `check_before_use`.
+        .test_before_acquire(false)
+        .before_acquire(|conn, _meta| Box::pin(check_before_use(conn)))
+}
+
+/// How long the check a pooled connection passes on its way out of the pool
+/// may take before that connection is thrown away.
+///
+/// sqlx's own check (`test_before_acquire`) pings every connection it hands
+/// out, which is right, but it has **no timeout of its own**. A socket a NAT
+/// had silently dropped (no FIN, no RST) never answered the ping, so the
+/// checkout waited out the whole [`ACQUIRE_TIMEOUT`] — thirty seconds — and
+/// then failed as `PoolTimedOut`, which [`crate::error::AppError`] reports as
+/// *too many connections*. A query after a coffee break looked like a full
+/// server. Now a check that does not answer within this bound discards that
+/// one connection, and the pool simply opens a fresh one.
+///
+/// **Every** checkout is still checked. Skipping the check for a connection
+/// used in the last thirty seconds was tried and measured behind an SSH
+/// tunnel: it saved about 12 ms a query, and it handed out connections that
+/// had died with the tunnel's session a moment earlier — the next query failed
+/// outright instead of being given a fresh connection. Not a trade worth making
+/// in a release whose point is fewer surprise disconnections.
+pub const STALE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The check a connection passes on its way out of the pool. `Err` makes sqlx
+/// close it hard and try another (or open a new one); see
+/// `sqlx_core::pool::inner::check_idle_conn`.
+async fn check_before_use<C>(conn: &mut C) -> Result<bool, sqlx::Error>
+where
+    C: sqlx::Connection,
+{
+    bounded_check(STALE_CHECK_TIMEOUT, conn.ping()).await
+}
+
+/// [`check_before_use`]'s verdict on one ping, bounded. A parameter rather
+/// than [`STALE_CHECK_TIMEOUT`] directly so the timeout branch is testable in
+/// milliseconds — the same shape, for the same reason, as `bounded_connect`.
+async fn bounded_check(
+    bound: Duration,
+    ping: impl std::future::Future<Output = Result<(), sqlx::Error>>,
+) -> Result<bool, sqlx::Error> {
+    match tokio::time::timeout(bound, ping).await {
+        Ok(Ok(())) => Ok(true),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "an idle pooled connection did not answer its health check",
+        ))),
+    }
 }
 
 /// What the user needs to see named when a pool cannot be opened: the driver
@@ -701,6 +805,49 @@ mod tests {
         .expect_err("nothing was listening");
         assert!(!e.is_too_many_connections());
         assert!(matches!(e, AppError::Database(_)));
+    }
+
+    /// A pooled connection whose socket a NAT dropped silently never answers
+    /// its check. That must cost the one connection, in seconds — not the whole
+    /// thirty-second acquire, reported as a server with no connections left.
+    #[tokio::test]
+    async fn a_connection_that_never_answers_its_check_is_discarded_not_waited_on() {
+        let e = bounded_check(
+            Duration::from_millis(20),
+            std::future::pending::<Result<(), sqlx::Error>>(),
+        )
+        .await
+        .expect_err("a silent connection must be rejected");
+        // `Io`, so sqlx closes it hard and opens another, and so it can never
+        // be read as a connection-limit refusal.
+        assert!(matches!(e, sqlx::Error::Io(ref io) if io.kind() == std::io::ErrorKind::TimedOut));
+        assert!(!AppError::from(e).is_too_many_connections());
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_answers_is_handed_out_and_a_broken_one_is_not() {
+        assert!(
+            bounded_check(Duration::from_secs(5), std::future::ready(Ok(())))
+                .await
+                .unwrap()
+        );
+        let refused = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        assert!(bounded_check(
+            Duration::from_secs(5),
+            std::future::ready(Err(sqlx::Error::Io(refused)))
+        )
+        .await
+        .is_err());
+    }
+
+    /// The real hook, end to end, against a live connection.
+    #[tokio::test]
+    async fn the_hook_passes_a_live_connection() {
+        use sqlx::Connection;
+        let mut conn = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        assert!(check_before_use(&mut conn).await.unwrap());
     }
 
     /// SQL Server solved this first and its wording is the one the user has

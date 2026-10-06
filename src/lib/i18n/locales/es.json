@@ -204,7 +204,8 @@
     "connected": "Conectado",
     "connectFailed": "No se ha podido conectar con {{name}}",
     "disconnectedAll": "{{count}} conexiones cerradas",
-    "lostTitle": "Se ha perdido la conexión con {{name}}"
+    "lostTitle": "Se ha perdido la conexión con {{name}}",
+    "restoredTitle": "Se ha recuperado la conexión con {{name}}"
   },
   "connectionDialog": {
     "titleNew": "Nueva conexión",

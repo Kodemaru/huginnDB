@@ -204,7 +204,8 @@
     "connected": "Connected",
     "connectFailed": "Could not connect to {{name}}",
     "disconnectedAll": "Disconnected {{count}} connection(s)",
-    "lostTitle": "Lost the connection to {{name}}"
+    "lostTitle": "Lost the connection to {{name}}",
+    "restoredTitle": "Connection to {{name}} restored"
   },
   "connectionDialog": {
     "titleNew": "New connection",
