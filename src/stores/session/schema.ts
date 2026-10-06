@@ -241,6 +241,50 @@ function emptyState(): ConnectionSchema {
   };
 }
 
+/**
+ * Fetches in flight, per connection, keyed by what they fetch.
+ *
+ * Every loader here used to start a fresh round trip on every call. The tree
+ * calls them from effects and handlers that cannot see each other, so the same
+ * question was routinely asked twice at once: connecting with the row already
+ * expanded fired one `refresh` from the explorer's mount effect and a second
+ * from `connectAndWarm` — two `list_databases` and two `list_tables` per
+ * connect — and collapsing a table and re-opening it before its columns
+ * arrived asked for them again. A second caller now **joins** the call already
+ * running and gets its answer.
+ *
+ * Joining means the first caller's options win: if it was `quiet`, a failure
+ * is reported by nobody but the callers that read the returned message, which
+ * is exactly what a quiet caller asked for. Per connection so `drop` can
+ * forget a closed pool's calls in one step.
+ */
+const inFlight = new Map<string, Map<string, Promise<unknown>>>();
+
+function joinInFlight<T>(
+  connectionId: string,
+  what: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  let calls = inFlight.get(connectionId);
+  const running = calls?.get(what);
+  if (running) return running as Promise<T>;
+  if (!calls) {
+    calls = new Map();
+    inFlight.set(connectionId, calls);
+  }
+  const owner = calls;
+  const promise = run().finally(() => {
+    // Only remove our own entry: `drop` may have replaced the whole map, and a
+    // newer call under the same key may already be running in it.
+    if (owner.get(what) === promise) owner.delete(what);
+    if (owner.size === 0 && inFlight.get(connectionId) === owner) {
+      inFlight.delete(connectionId);
+    }
+  });
+  owner.set(what, promise);
+  return promise;
+}
+
 /** Stable cache key for a (schema, table) pair. */
 export function tableKey(schema: string | undefined, table: string) {
   return `${schema ?? ""}.${table}`;
@@ -287,141 +331,155 @@ export function mergeTableStats(
 
 export const useSchema = create<SchemaState>((set, get) => ({
   byConnection: {},
-  refresh: async (connectionId, opts) => {
-    const quiet = opts?.quiet ?? false;
-    set((state) => ({
-      byConnection: {
-        ...state.byConnection,
-        [connectionId]: {
-          ...(state.byConnection[connectionId] ?? emptyState()),
-          loading: true,
-          error: null,
+  refresh: (connectionId, opts) =>
+    joinInFlight(connectionId, "refresh", async () => {
+      const quiet = opts?.quiet ?? false;
+      set((state) => ({
+        byConnection: {
+          ...state.byConnection,
+          [connectionId]: {
+            ...(state.byConnection[connectionId] ?? emptyState()),
+            loading: true,
+            error: null,
+          },
         },
-      },
-    }));
-    try {
-      const [databases, tables] = await Promise.all([
-        api.listDatabases(connectionId),
-        api.listTables(connectionId),
-      ]);
-      // Tables whose per-table metadata was cached *and* whose node is still
-      // open — read before the wipe below so they can be re-fetched after it.
-      // Computed here rather than inside the `set` updater to keep that
-      // updater a pure state transition.
-      const before = get().byConnection[connectionId];
-      const reloadColumns: TableInfo[] = [];
-      const reloadIndexes: TableInfo[] = [];
-      for (const t of tables) {
-        if (!before) break;
-        const k = tableKey(t.schema, t.name);
-        if (!before.expanded.has(`table:${k}`)) continue;
-        if (before.columns[k] || before.columnErrors[k]) reloadColumns.push(t);
-        if (before.indexes[k] || before.indexErrors[k]) reloadIndexes.push(t);
+      }));
+      try {
+        // A per-database view answers `list_databases` with the *server's*
+        // list — the same one its parent already holds — so asking again was
+        // a server-wide catalog read on every database expanded, kept only for
+        // the rename dialog's destination picker. Borrow the parent's when it
+        // has one; a view refreshed on its own (parent never listed) still
+        // asks.
+        const parent = parentConnectionId(connectionId);
+        const known =
+          parent !== connectionId
+            ? get().byConnection[parent]?.databases
+            : undefined;
+        const [databases, tables] = await Promise.all([
+          known && known.length > 0
+            ? Promise.resolve(known)
+            : api.listDatabases(connectionId),
+          api.listTables(connectionId),
+        ]);
+        // Tables whose per-table metadata was cached *and* whose node is still
+        // open — read before the wipe below so they can be re-fetched after it.
+        // Computed here rather than inside the `set` updater to keep that
+        // updater a pure state transition.
+        const before = get().byConnection[connectionId];
+        const reloadColumns: TableInfo[] = [];
+        const reloadIndexes: TableInfo[] = [];
+        for (const t of tables) {
+          if (!before) break;
+          const k = tableKey(t.schema, t.name);
+          if (!before.expanded.has(`table:${k}`)) continue;
+          if (before.columns[k] || before.columnErrors[k]) reloadColumns.push(t);
+          if (before.indexes[k] || before.indexErrors[k]) reloadIndexes.push(t);
+        }
+        set((state) => {
+          // Discard a response that outlived its slice — see the note in the
+          // catch below.
+          const current = state.byConnection[connectionId];
+          if (!current) return state;
+          return {
+            byConnection: {
+              ...state.byConnection,
+              [connectionId]: {
+                ...current,
+                databases,
+                tables,
+                // Invalidate the per-table metadata too. Keeping it across a
+                // refresh is what made an `ALTER TABLE ADD COLUMN` performed
+                // outside the app invisible forever: `TableRow` only calls
+                // `loadColumns` when the key is *absent* (a deliberate guard, so
+                // collapsing and re-expanding doesn't re-query), and the only
+                // other thing that ever cleared these was `drop()` on
+                // disconnect. "Refresh" has to mean the schema, not just the
+                // table list.
+                columns: {},
+                indexes: {},
+                columnErrors: {},
+                indexErrors: {},
+                // Sizes go with them, for the reason the comment above gives:
+                // "Refresh" means the schema. A database that grew — or was
+                // dropped and recreated — outside the app would otherwise keep
+                // showing the size it had when the tree was first opened, with
+                // no way to correct it short of disconnecting. Cleared rather
+                // than re-fetched: the next database node to render asks again,
+                // so the cost is only paid if something is actually on screen.
+                databaseSizes: {},
+                databaseSizesLoading: false,
+                databaseSizesLoaded: false,
+                loading: false,
+                initialized: true,
+              },
+            },
+          };
+        });
+        // Badges after the names, never before them — and not awaited, so a
+        // caller awaiting `refresh` (connecting, the warm scheduler) is not held
+        // up by figures nobody is blocked on.
+        if (needsTableStats(tables)) void get().loadTableStats(connectionId);
+        // Re-populate what the user has open, so an expanded table comes back
+        // with its (now current) columns instead of an empty node the guard
+        // above would never fill on its own.
+        await Promise.all([
+          ...reloadColumns.map((t) =>
+            get().loadColumns(connectionId, t.schema, t.name, { quiet }),
+          ),
+          ...reloadIndexes.map((t) =>
+            get().loadIndexes(connectionId, t.schema, t.name, { quiet }),
+          ),
+        ]);
+        return null;
+      } catch (e) {
+        // Nothing to report when the slice is already gone: the staleness case
+        // described in the updater below means this error describes a pool that
+        // no longer exists, and a card about it would be pure noise arriving
+        // after a disconnect. Read before the `set` — nothing awaits in between,
+        // so this is the same check the updater makes.
+        if (!get().byConnection[connectionId]) return null;
+        const message = reportSchemaFailure(
+          e,
+          "schema.loadFailed",
+          connectionId,
+          quiet,
+        );
+        set((state) => {
+          // If `drop(connectionId)` ran while this call was in flight, the
+          // connection is gone (disconnected, or its environment was switched
+          // away from) and this result is stale. Writing it would *resurrect* the
+          // slice, because the spread below used to fall back to `emptyState()`
+          // for a missing entry — and resurrecting it on the error path is
+          // permanent damage, not a cosmetic glitch: the entry comes back with
+          // `initialized: true`, which is exactly the flag that stops the
+          // explorer's `!initialized && !loading` guard from ever retrying.
+          //
+          // That is the "not connected: <id>" that survived a full reconnect: the
+          // teardown closed the pool, an in-flight `list_tables` lost the race and
+          // landed after the drop, and the healthy connection that came back
+          // inherited a poisoned slice no automatic path would ever refresh.
+          const current = state.byConnection[connectionId];
+          if (!current) return state;
+          return {
+            byConnection: {
+              ...state.byConnection,
+              [connectionId]: {
+                ...current,
+                loading: false,
+                // Mark as initialized even on failure so the useEffect guard
+                // (`!cs.initialized && !cs.loading`) does not auto-retry and
+                // create a loop. The user can retry manually via the refresh
+                // button. Safe only because of the staleness check above.
+                initialized: true,
+                error: message,
+              },
+            },
+          };
+        });
+        return message;
       }
-      set((state) => {
-        // Discard a response that outlived its slice — see the note in the
-        // catch below.
-        const current = state.byConnection[connectionId];
-        if (!current) return state;
-        return {
-          byConnection: {
-            ...state.byConnection,
-            [connectionId]: {
-              ...current,
-              databases,
-              tables,
-              // Invalidate the per-table metadata too. Keeping it across a
-              // refresh is what made an `ALTER TABLE ADD COLUMN` performed
-              // outside the app invisible forever: `TableRow` only calls
-              // `loadColumns` when the key is *absent* (a deliberate guard, so
-              // collapsing and re-expanding doesn't re-query), and the only
-              // other thing that ever cleared these was `drop()` on
-              // disconnect. "Refresh" has to mean the schema, not just the
-              // table list.
-              columns: {},
-              indexes: {},
-              columnErrors: {},
-              indexErrors: {},
-              // Sizes go with them, for the reason the comment above gives:
-              // "Refresh" means the schema. A database that grew — or was
-              // dropped and recreated — outside the app would otherwise keep
-              // showing the size it had when the tree was first opened, with
-              // no way to correct it short of disconnecting. Cleared rather
-              // than re-fetched: the next database node to render asks again,
-              // so the cost is only paid if something is actually on screen.
-              databaseSizes: {},
-              databaseSizesLoading: false,
-              databaseSizesLoaded: false,
-              loading: false,
-              initialized: true,
-            },
-          },
-        };
-      });
-      // Badges after the names, never before them — and not awaited, so a
-      // caller awaiting `refresh` (connecting, the warm scheduler) is not held
-      // up by figures nobody is blocked on.
-      if (needsTableStats(tables)) void get().loadTableStats(connectionId);
-      // Re-populate what the user has open, so an expanded table comes back
-      // with its (now current) columns instead of an empty node the guard
-      // above would never fill on its own.
-      await Promise.all([
-        ...reloadColumns.map((t) =>
-          get().loadColumns(connectionId, t.schema, t.name, { quiet }),
-        ),
-        ...reloadIndexes.map((t) =>
-          get().loadIndexes(connectionId, t.schema, t.name, { quiet }),
-        ),
-      ]);
-      return null;
-    } catch (e) {
-      // Nothing to report when the slice is already gone: the staleness case
-      // described in the updater below means this error describes a pool that
-      // no longer exists, and a card about it would be pure noise arriving
-      // after a disconnect. Read before the `set` — nothing awaits in between,
-      // so this is the same check the updater makes.
-      if (!get().byConnection[connectionId]) return null;
-      const message = reportSchemaFailure(
-        e,
-        "schema.loadFailed",
-        connectionId,
-        quiet,
-      );
-      set((state) => {
-        // If `drop(connectionId)` ran while this call was in flight, the
-        // connection is gone (disconnected, or its environment was switched
-        // away from) and this result is stale. Writing it would *resurrect* the
-        // slice, because the spread below used to fall back to `emptyState()`
-        // for a missing entry — and resurrecting it on the error path is
-        // permanent damage, not a cosmetic glitch: the entry comes back with
-        // `initialized: true`, which is exactly the flag that stops the
-        // explorer's `!initialized && !loading` guard from ever retrying.
-        //
-        // That is the "not connected: <id>" that survived a full reconnect: the
-        // teardown closed the pool, an in-flight `list_tables` lost the race and
-        // landed after the drop, and the healthy connection that came back
-        // inherited a poisoned slice no automatic path would ever refresh.
-        const current = state.byConnection[connectionId];
-        if (!current) return state;
-        return {
-          byConnection: {
-            ...state.byConnection,
-            [connectionId]: {
-              ...current,
-              loading: false,
-              // Mark as initialized even on failure so the useEffect guard
-              // (`!cs.initialized && !cs.loading`) does not auto-retry and
-              // create a loop. The user can retry manually via the refresh
-              // button. Safe only because of the staleness check above.
-              initialized: true,
-              error: message,
-            },
-          },
-        };
-      });
-      return message;
-    }
-  },
+    }),
   refreshTree: async (connectionId) => {
     // Accept either id shape: a child id resolves to its parent, so a caller
     // never has to know which one it is holding.
@@ -449,105 +507,107 @@ export const useSchema = create<SchemaState>((set, get) => ({
       },
     }));
   },
-  loadColumns: async (connectionId, schema, table, opts) => {
-    const key = tableKey(schema, table);
-    try {
-      const cols = await api.listColumns(connectionId, schema, table);
-      set((state) => {
-        // A response outliving its slice (the connection was dropped while
-        // this call was in flight — see the note in `refresh`'s catch
-        // branch) must not resurrect it.
-        const current = state.byConnection[connectionId];
-        if (!current) return state;
-        // Drop the key entirely rather than storing `undefined`, so
-        // `cs.columnErrors?.[key]` reads as absent, not as a falsy value.
-        const { [key]: _cleared, ...columnErrors } = current.columnErrors;
-        return {
-          byConnection: {
-            ...state.byConnection,
-            [connectionId]: {
-              ...current,
-              columns: { ...current.columns, [key]: cols },
-              columnErrors,
+  loadColumns: (connectionId, schema, table, opts) =>
+    joinInFlight(connectionId, `columns:${tableKey(schema, table)}`, async () => {
+      const key = tableKey(schema, table);
+      try {
+        const cols = await api.listColumns(connectionId, schema, table);
+        set((state) => {
+          // A response outliving its slice (the connection was dropped while
+          // this call was in flight — see the note in `refresh`'s catch
+          // branch) must not resurrect it.
+          const current = state.byConnection[connectionId];
+          if (!current) return state;
+          // Drop the key entirely rather than storing `undefined`, so
+          // `cs.columnErrors?.[key]` reads as absent, not as a falsy value.
+          const { [key]: _cleared, ...columnErrors } = current.columnErrors;
+          return {
+            byConnection: {
+              ...state.byConnection,
+              [connectionId]: {
+                ...current,
+                columns: { ...current.columns, [key]: cols },
+                columnErrors,
+              },
             },
-          },
-        };
-      });
-    } catch (e) {
-      // Never let a rejected promise here leave the explorer's column cell
-      // stuck on its loading skeleton forever — record the error so the UI can
-      // render its retry affordance, *and* report it. The inline row is the
-      // better affordance and stays; the card is what makes the failure
-      // reachable when the node is collapsed, folded away by the filter, or in
-      // a window the user is not looking at.
-      if (!get().byConnection[connectionId]) return;
-      const message = reportSchemaFailure(
-        e,
-        "schema.columnsLoadFailed",
-        connectionId,
-        opts?.quiet ?? false,
-      );
-      set((state) => {
-        const current = state.byConnection[connectionId];
-        if (!current) return state;
-        return {
-          byConnection: {
-            ...state.byConnection,
-            [connectionId]: {
-              ...current,
-              columnErrors: { ...current.columnErrors, [key]: message },
+          };
+        });
+      } catch (e) {
+        // Never let a rejected promise here leave the explorer's column cell
+        // stuck on its loading skeleton forever — record the error so the UI can
+        // render its retry affordance, *and* report it. The inline row is the
+        // better affordance and stays; the card is what makes the failure
+        // reachable when the node is collapsed, folded away by the filter, or in
+        // a window the user is not looking at.
+        if (!get().byConnection[connectionId]) return;
+        const message = reportSchemaFailure(
+          e,
+          "schema.columnsLoadFailed",
+          connectionId,
+          opts?.quiet ?? false,
+        );
+        set((state) => {
+          const current = state.byConnection[connectionId];
+          if (!current) return state;
+          return {
+            byConnection: {
+              ...state.byConnection,
+              [connectionId]: {
+                ...current,
+                columnErrors: { ...current.columnErrors, [key]: message },
+              },
             },
-          },
-        };
-      });
-    }
-  },
-  loadIndexes: async (connectionId, schema, table, opts) => {
-    const key = tableKey(schema, table);
-    try {
-      const idx = await api.listIndexes(connectionId, schema, table);
-      set((state) => {
-        const current = state.byConnection[connectionId];
-        if (!current) return state;
-        const { [key]: _cleared, ...rest } = current.indexErrors;
-        return {
-          byConnection: {
-            ...state.byConnection,
-            [connectionId]: {
-              ...current,
-              indexes: { ...current.indexes, [key]: idx },
-              indexErrors: rest,
+          };
+        });
+      }
+    }),
+  loadIndexes: (connectionId, schema, table, opts) =>
+    joinInFlight(connectionId, `indexes:${tableKey(schema, table)}`, async () => {
+      const key = tableKey(schema, table);
+      try {
+        const idx = await api.listIndexes(connectionId, schema, table);
+        set((state) => {
+          const current = state.byConnection[connectionId];
+          if (!current) return state;
+          const { [key]: _cleared, ...rest } = current.indexErrors;
+          return {
+            byConnection: {
+              ...state.byConnection,
+              [connectionId]: {
+                ...current,
+                indexes: { ...current.indexes, [key]: idx },
+                indexErrors: rest,
+              },
             },
-          },
-        };
-      });
-    } catch (e) {
-      // `indexErrors` is read by no component yet (`IndexesSectionHeader` is
-      // headers-only), so until this reported, a failed index read was written
-      // to a field nothing rendered and was indistinguishable from a table with
-      // no indexes. The card is currently the *only* way it surfaces.
-      if (!get().byConnection[connectionId]) return;
-      const message = reportSchemaFailure(
-        e,
-        "schema.indexesLoadFailed",
-        connectionId,
-        opts?.quiet ?? false,
-      );
-      set((state) => {
-        const current = state.byConnection[connectionId];
-        if (!current) return state;
-        return {
-          byConnection: {
-            ...state.byConnection,
-            [connectionId]: {
-              ...current,
-              indexErrors: { ...current.indexErrors, [key]: message },
+          };
+        });
+      } catch (e) {
+        // `indexErrors` is read by no component yet (`IndexesSectionHeader` is
+        // headers-only), so until this reported, a failed index read was written
+        // to a field nothing rendered and was indistinguishable from a table with
+        // no indexes. The card is currently the *only* way it surfaces.
+        if (!get().byConnection[connectionId]) return;
+        const message = reportSchemaFailure(
+          e,
+          "schema.indexesLoadFailed",
+          connectionId,
+          opts?.quiet ?? false,
+        );
+        set((state) => {
+          const current = state.byConnection[connectionId];
+          if (!current) return state;
+          return {
+            byConnection: {
+              ...state.byConnection,
+              [connectionId]: {
+                ...current,
+                indexErrors: { ...current.indexErrors, [key]: message },
+              },
             },
-          },
-        };
-      });
-    }
-  },
+          };
+        });
+      }
+    }),
   replaceExpanded: (connectionId, expanded) => {
     const cur = get().byConnection[connectionId] ?? emptyState();
     set((state) => ({
@@ -638,6 +698,11 @@ export const useSchema = create<SchemaState>((set, get) => ({
     }));
   },
   drop: (connectionId) => {
+    // A call still in flight for this connection belongs to the pool that was
+    // just closed. Left in the table, the next connection's first `refresh`
+    // would *join* it and inherit its "not connected" — the poisoned slice
+    // the comment in `refresh`'s catch describes, by a new route.
+    inFlight.delete(connectionId);
     set((state) => {
       const copy = { ...state.byConnection };
       delete copy[connectionId];

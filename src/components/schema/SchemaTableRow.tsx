@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 
 import { IconButton } from "@/components/ui/icon-button";
+import { TreeSkeleton } from "@/components/schema/TreeStatus";
 import { runAiTask } from "@/lib/ai/runTask";
 import {
   ContextMenu,
@@ -64,23 +65,6 @@ function typeColorClass(dataType: string): string {
     return "text-numeric";
   if (/bool/.test(d)) return "text-success";
   return "text-muted-foreground/70";
-}
-
-/** Shimmer placeholder rows shown while a table's columns load, instead of a
- *  bare italic "loading…" line — reads as an active fetch rather than a stall.
- *  Keeps the original label as the accessible status text. */
-function ColumnSkeleton({ label }: { label: string }) {
-  return (
-    <div className="space-y-1 py-1" role="status" aria-label={label}>
-      {[0, 1, 2].map((i) => (
-        <div
-          key={i}
-          className="h-2.5 animate-pulse rounded-sm bg-muted-foreground/15"
-          style={{ width: `${70 - i * 12}%` }}
-        />
-      ))}
-    </div>
-  );
 }
 
 /** Renders the right-aligned per-table metric badge (row count or size). */
@@ -355,7 +339,7 @@ export const TableRow = memo(function TableRow({
                   </span>
                 </button>
               ) : (
-                <ColumnSkeleton label={loadingLabel} />
+                <TreeSkeleton label={loadingLabel} />
               )}
             </div>
           )}
