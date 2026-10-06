@@ -96,6 +96,78 @@ beforeEach(() => {
   getTableStats.mockResolvedValue([]);
 });
 
+describe("calls in flight", () => {
+  it("a second refresh joins the first instead of asking again", async () => {
+    let answer!: (rows: TableInfo[]) => void;
+    listTables.mockReturnValueOnce(new Promise((r) => (answer = r)));
+
+    // The connect path: the explorer's mount effect and `connectAndWarm`
+    // both ask, a moment apart.
+    const first = useSchema.getState().refresh("c1");
+    const second = useSchema.getState().refresh("c1", { quiet: true });
+    answer([table("users")]);
+    await Promise.all([first, second]);
+
+    expect(listTables).toHaveBeenCalledTimes(1);
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+    expect(useSchema.getState().byConnection.c1.tables).toEqual([table("users")]);
+  });
+
+  it("asks again once the first call has settled", async () => {
+    await useSchema.getState().refresh("c1");
+    await useSchema.getState().refresh("c1");
+    expect(listTables).toHaveBeenCalledTimes(2);
+  });
+
+  it("a dropped connection's call is not joined by the next connection", async () => {
+    // The pool behind this call is closed by the disconnect; joining it would
+    // hand the reconnected slice its "not connected".
+    listTables.mockReturnValueOnce(new Promise(() => {}));
+    void useSchema.getState().refresh("c1");
+    useSchema.getState().drop("c1");
+
+    listTables.mockResolvedValueOnce([table("fresh")]);
+    await useSchema.getState().refresh("c1");
+
+    expect(listTables).toHaveBeenCalledTimes(2);
+    expect(useSchema.getState().byConnection.c1.tables).toEqual([table("fresh")]);
+  });
+
+  it("re-opening a table before its columns arrive does not ask twice", async () => {
+    seed("c1");
+    let answer!: (cols: ColumnInfo[]) => void;
+    listColumns.mockReturnValueOnce(new Promise((r) => (answer = r)));
+
+    const a = useSchema.getState().loadColumns("c1", "", "users");
+    const b = useSchema.getState().loadColumns("c1", "", "users");
+    // A different table is a different question.
+    const c = useSchema.getState().loadColumns("c1", "", "orders");
+    answer([]);
+    await Promise.all([a, b, c]);
+
+    expect(listColumns).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("per-database views", () => {
+  it("borrow the server's database list from their parent", async () => {
+    seed("p", { databases: [{ name: "a" }, { name: "b" }] });
+
+    await useSchema.getState().refresh("p::db::a");
+
+    expect(listDatabases).not.toHaveBeenCalled();
+    expect(useSchema.getState().byConnection["p::db::a"].databases).toEqual([
+      { name: "a" },
+      { name: "b" },
+    ]);
+  });
+
+  it("still ask when the parent never listed them", async () => {
+    await useSchema.getState().refresh("p::db::a");
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("deferred table stats", () => {
   const bare = (name: string): TableInfo => ({ name, schema: "db", kind: "table" });
 

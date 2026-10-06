@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **An expanded database showed a blank subtree while it loaded.** The schema
+  tree now shows placeholder rows until a database's tables arrive, and a
+  spinner on the database's own row while it is being opened or refreshed, so
+  you can tell a slow server from an empty database even with the node
+  collapsed.
+- **A database that failed to open retried endlessly.** Expanding a database
+  the server refused (for example, because it was out of connections) tried
+  again straight away, forever, with a new error notification each time. It now
+  stops at the first failure and shows the error with a **Retry** button.
+  Collapsing and re-expanding the node also tries again.
+- **A failed schema read had no way back except a context menu.** The error
+  line in the tree now carries a **Retry** button.
+- **Connecting fetched the schema twice.** With the connection's row already
+  expanded, the database and table lists were read twice per connect.
+  Requests already in flight are now shared, and the same goes for re-opening a
+  table before its columns have arrived.
+- **Every database you expanded re-read the server's whole database list.** A
+  database now reuses the list its connection already has.
 - **Expanding a MongoDB database was slow behind an SSH tunnel.** The tree
   waited until it had every collection's document count before showing any
   collection at all, and it asked for those counts one after another. Behind a

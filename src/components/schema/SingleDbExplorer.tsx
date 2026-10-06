@@ -30,6 +30,7 @@ import { usePolicyLocker } from "@/lib/policy/access";
 
 import { DatabaseNodeMenu } from "@/components/schema/DatabaseNodeMenu";
 import { IndexesSectionHeader } from "@/components/schema/IndexesSectionHeader";
+import { SchemaLoadError, TreeSkeleton } from "@/components/schema/TreeStatus";
 import { TableSection } from "@/components/schema/SchemaTableSection";
 import { DropObjectDialog } from "@/components/schema/dialogs/DropObjectDialog";
 import { EmptyTableDialog } from "@/components/schema/dialogs/EmptyTableDialog";
@@ -332,11 +333,17 @@ export const SingleDbExplorer = memo(function SingleDbExplorer({
     [wrappedOpenTab, onTableOpen, refresh, connectionId, t, driver],
   );
 
-  if (!cs) {
+  // The first read, not only the missing slice: `refresh` creates the slice
+  // the instant it starts, so `!cs` alone was true for no time at all and an
+  // expanded database spent its whole `list_tables` round trip as an empty
+  // subtree. A *re*-fetch keeps drawing what it already has.
+  if (!cs || (!cs.initialized && !cs.error)) {
     return (
-      <div className="px-3 py-3 text-xs text-muted-foreground">
-        {t("schema.loading")}
-      </div>
+      <TreeSkeleton
+        label={t("schema.loading")}
+        rows={4}
+        className="space-y-1.5 px-3 py-2"
+      />
     );
   }
 
@@ -368,7 +375,10 @@ export const SingleDbExplorer = memo(function SingleDbExplorer({
   return (
     <div className="flex flex-col">
       {cs.error && (
-        <div className="px-3 py-2 text-xs text-destructive">{cs.error}</div>
+        <SchemaLoadError
+          message={cs.error}
+          onRetry={() => void refresh(connectionId)}
+        />
       )}
       <div className="pb-1 text-sm">
         {/* The database node, for the drivers whose schemas are not it. */}

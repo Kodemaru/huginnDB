@@ -21,7 +21,7 @@
  * (`patterns`) alongside this connection's `summary`.
  */
 
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronDown,
@@ -36,9 +36,11 @@ import { usePolicyLock } from "@/lib/policy/access";
 
 import { DatabaseNodeMenu } from "@/components/schema/DatabaseNodeMenu";
 import { SingleDbExplorer } from "@/components/schema/SingleDbExplorer";
+import { SchemaLoadError, TreeSkeleton } from "@/components/schema/TreeStatus";
 import { CreateDatabaseDialog } from "@/components/schema/dialogs/CreateDatabaseDialog";
 import { DatabaseVisibilityDialog } from "@/components/schema/dialogs/DatabaseVisibilityDialog";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { TreeRow } from "@/components/ui/tree-row";
 import { confirmIrreversible } from "@/lib/confirmDestructive";
 import { useVisibleDatabases } from "@/lib/connection/useVisibleDatabases";
@@ -196,11 +198,15 @@ export const MultiDbExplorer = memo(function MultiDbExplorer({
     });
   }, [cs?.databases, visibleSet, filterActive, summary, scope, parentId]);
 
-  if (!cs) {
+  // See `SingleDbExplorer`: the slice exists from the first instant of the
+  // first read, so "no slice" alone never showed the user anything.
+  if (!cs || (!cs.initialized && !cs.error)) {
     return (
-      <div className="px-3 py-3 text-xs text-muted-foreground">
-        {t("schema.loading")}
-      </div>
+      <TreeSkeleton
+        label={t("schema.loading")}
+        rows={4}
+        className="space-y-1.5 px-3 py-2"
+      />
     );
   }
 
@@ -246,7 +252,10 @@ export const MultiDbExplorer = memo(function MultiDbExplorer({
         </div>
       )}
       {cs.error && (
-        <div className="px-3 py-2 text-xs text-destructive">{cs.error}</div>
+        <SchemaLoadError
+          message={cs.error}
+          onRetry={() => void useSchema.getState().refresh(parentId)}
+        />
       )}
       <div className="pb-1 text-sm">
         {/* Only ever said about databases we have actually read: a cold one
@@ -464,8 +473,22 @@ function DatabaseRoot({
   // *collapsed*. There the state was written into a branch that is not
   // mounted, so the menu item did nothing at all and said nothing about it.
   // See gotcha #68.
-  const resolveChildId = async (): Promise<string | null> => {
-    if (childId) return childId;
+  //
+  // One open at a time: the expand effect and a context-menu action fired
+  // while it is still running used to open the view twice — two pools against
+  // the server, the second replacing the first. A second caller now waits on
+  // the first open instead.
+  const opening$ = useRef<Promise<string | null> | null>(null);
+  const resolveChildId = (): Promise<string | null> => {
+    if (childId) return Promise.resolve(childId);
+    if (!opening$.current) {
+      opening$.current = openChild().finally(() => {
+        opening$.current = null;
+      });
+    }
+    return opening$.current;
+  };
+  const openChild = async (): Promise<string | null> => {
     try {
       const id = await openTrackedDatabaseView(parentId, dbName);
       setChildId(id);
@@ -553,12 +576,29 @@ function DatabaseRoot({
   const effectiveExpanded =
     expanded || autoExpand || (filterActive && childId !== null);
 
+  // Opens the view once per expand. `error` is in the guard on purpose: this
+  // effect depends on `opening`, so without it a failed open flipped `opening`
+  // back to false, re-ran the effect and tried again — forever, one error card
+  // per attempt, against a server that was already saying no. A failure now
+  // stays on screen with a Retry button (which clears it), and collapsing the
+  // node forgets it so the next expand tries afresh.
   useEffect(() => {
-    if (!effectiveExpanded || childId || opening) return;
+    if (!effectiveExpanded || childId || opening || error) return;
     setOpening(true);
-    setError(null);
-    resolveChildId().finally(() => setOpening(false));
-  }, [effectiveExpanded, childId, opening, parentId, dbName]);
+    void resolveChildId().finally(() => setOpening(false));
+  }, [effectiveExpanded, childId, opening, error, parentId, dbName]);
+  useEffect(() => {
+    if (!effectiveExpanded) setError(null);
+  }, [effectiveExpanded]);
+
+  // The child's own read, as one boolean (gotcha #1). Together with `opening`
+  // it is everything this node can be waiting on, and it is shown on the row
+  // itself so it is visible with the node collapsed too — a menu "Refresh" on
+  // a closed database used to give no sign of life at all.
+  const childLoading = useSchema((s) =>
+    childId ? (s.byConnection[childId]?.loading ?? false) : false,
+  );
+  const busy = opening || childLoading;
 
   return (
     <div>
@@ -615,7 +655,13 @@ function DatabaseRoot({
                 A search is a transient question the user just asked and the
                 match count is its answer; the size is ambient. Rendering both
                 would also wrap the row at the width this panel is docked at. */}
-            {!filterActive && sizeBadge !== null && (
+            {!filterActive && busy && (
+              <Spinner
+                size="xs"
+                className="ml-auto shrink-0 text-muted-foreground"
+              />
+            )}
+            {!filterActive && !busy && sizeBadge !== null && (
               <span className="ml-auto shrink-0 pl-2 text-3xs tabular-nums text-muted-foreground">
                 {sizeBadge}
               </span>
@@ -642,12 +688,13 @@ function DatabaseRoot({
       {effectiveExpanded && (
         <div className="ml-3 border-l border-border/35 pl-0.5">
           {error && (
-            <div className="px-3 py-1 text-2xs text-destructive">{error}</div>
+            <SchemaLoadError message={error} onRetry={() => setError(null)} />
           )}
           {opening && !childId && (
-            <div className="px-3 py-1 text-2xs italic text-muted-foreground">
-              …
-            </div>
+            <TreeSkeleton
+              label={t("schema.loading")}
+              className="space-y-1.5 px-3 py-2"
+            />
           )}
           {childId && (
             <SingleDbExplorer

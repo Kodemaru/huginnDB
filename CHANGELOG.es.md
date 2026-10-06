@@ -10,6 +10,26 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ### Corregido
 
+- **Una base de datos desplegada se quedaba en blanco mientras cargaba.** El
+  árbol de esquemas muestra ahora filas provisionales hasta que llegan las
+  tablas de la base de datos, y un indicador de carga en la propia fila de la
+  base de datos mientras se abre o se refresca. Así se distingue un servidor
+  lento de una base de datos vacía, incluso con el nodo plegado.
+- **Una base de datos que no se podía abrir lo reintentaba sin fin.** Al
+  desplegar una base de datos que el servidor rechazaba (por ejemplo, por
+  quedarse sin conexiones), se volvía a intentar al instante, para siempre, con
+  una notificación de error nueva cada vez. Ahora se detiene en el primer fallo
+  y muestra el error con un botón **Reintentar**. Plegar y volver a desplegar
+  el nodo también lo reintenta.
+- **Un fallo al leer el esquema solo tenía arreglo desde un menú contextual.**
+  La línea de error del árbol lleva ahora un botón **Reintentar**.
+- **Al conectar se pedía el esquema dos veces.** Con la fila de la conexión ya
+  desplegada, las listas de bases de datos y de tablas se leían dos veces en
+  cada conexión. Ahora las peticiones que ya están en curso se comparten, y lo
+  mismo pasa al volver a abrir una tabla antes de que lleguen sus columnas.
+- **Cada base de datos que desplegabas volvía a leer la lista entera de bases
+  de datos del servidor.** Ahora reutiliza la lista que ya tiene su conexión.
+
 - **Desplegar una base de datos MongoDB era lento a través de un túnel SSH.**
   El árbol esperaba a tener el número de documentos de todas las colecciones
   antes de mostrar ninguna, y además los pedía uno detrás de otro. Detrás de un
