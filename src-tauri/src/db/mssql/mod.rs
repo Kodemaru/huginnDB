@@ -136,10 +136,25 @@ impl MsSqlPool {
         let existing = {
             let mut idle = self.inner.idle.lock().await;
             drop_expired(&mut idle);
-            idle.pop().map(|(client, _)| client)
+            idle.pop()
         };
+        // The same rule `db::pool::check_before_use` applies to the sqlx
+        // drivers: an idle session is checked, with its own timeout, before it
+        // is handed out, and one that does not answer is replaced rather than
+        // handed to a query that would fail on it — or, on a socket a NAT
+        // dropped silently, hang on it. This pool had no check at all before.
         let client = match existing {
-            Some(c) => c,
+            Some((mut client, _)) => {
+                let alive = tokio::time::timeout(crate::db::pool::STALE_CHECK_TIMEOUT, async {
+                    let stream = client.simple_query("SELECT 1").await?;
+                    stream.into_results().await
+                })
+                .await;
+                match alive {
+                    Ok(Ok(_)) => client,
+                    _ => connect(&self.inner.cfg, self.inner.reach).await?,
+                }
+            }
             None => connect(&self.inner.cfg, self.inner.reach).await?,
         };
         Ok(PooledClient {
@@ -755,7 +770,7 @@ fn auth_method(opts: &MsSqlOptions, username: &str, password: &str) -> AppResult
 pub async fn open_pool(
     profile: &ConnectionProfile,
     password: &str,
-    ssh_secret: Option<String>,
+    route: crate::db::pool::TunnelRoute,
     known_hosts: SharedKnownHosts,
     limits: crate::db::pool::PoolLimits,
 ) -> AppResult<(DbPool, Option<SshTunnelHandle>)> {
@@ -782,12 +797,17 @@ pub async fn open_pool(
     // `ConnectionProfile::effective_port`); resolve it once, before the tunnel
     // decision, so both branches dial the same number.
     let remote_port = profile.effective_port();
-    let (host, port, handle) = match profile.ssh_tunnel.as_ref() {
-        Some(tunnel) => {
+    let (host, port, handle) = match (profile.ssh_tunnel.as_ref(), route) {
+        (Some(tunnel), crate::db::pool::TunnelRoute::Dial(ssh_secret)) => {
             let h = ssh::open_tunnel(tunnel, ssh_secret, &server, remote_port, known_hosts).await?;
             ("127.0.0.1".to_string(), h.local_port, Some(h))
         }
-        None => (server, remote_port, None),
+        // A per-database view riding its parent's tunnel: see
+        // `db::pool::open_pool_routed`.
+        (Some(_), crate::db::pool::TunnelRoute::Through(local_port)) => {
+            ("127.0.0.1".to_string(), local_port, None)
+        }
+        (None, _) => (server, remote_port, None),
     };
 
     let (cfg, reach) = build_config(profile, password, &host, port, instance.as_deref())?;

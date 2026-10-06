@@ -188,6 +188,22 @@ describe("grouping", () => {
     expect(useNotifications.getState().entries).toHaveLength(2);
   });
 
+  it("dismisses a group's card once it is no longer true, and forgets the group", () => {
+    // The "connection lost" card, after the connection came back by itself.
+    notify.warning("Lost the connection", { group: "connection-lost:p" });
+    const card = last().id;
+    notify.dismissGroup("connection-lost:p");
+    expect(toastDismiss).toHaveBeenCalledWith(card);
+
+    // A later loss is a new card, not a repeat folded into the dismissed one.
+    notify.warning("Lost the connection", { group: "connection-lost:p" });
+    expect(last().id).not.toBe(card);
+    // Nothing up for this group: a no-op, not an error.
+    toastDismiss.mockClear();
+    notify.dismissGroup("connection-lost:absent");
+    expect(toastDismiss).not.toHaveBeenCalled();
+  });
+
   it("ends the group when the card closes, so the next one starts at one", () => {
     notify.success("Cell saved");
     const first = last().id;

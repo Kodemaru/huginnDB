@@ -49,12 +49,40 @@ pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(180);
 /// Tauri event name the frontend subscribes to.
 pub const CONNECTION_LOST_EVENT: &str = "huginndb://connection-lost";
 
+/// Emitted when a connection reported lost answers again.
+pub const CONNECTION_RESTORED_EVENT: &str = "huginndb://connection-restored";
+
 /// Payload for [`CONNECTION_LOST_EVENT`].
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnectionLostPayload {
     pub connection_id: String,
     pub error: String,
 }
+
+/// Payload for [`CONNECTION_RESTORED_EVENT`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectionRestoredPayload {
+    pub connection_id: String,
+}
+
+/// Waits before re-pinging a connection whose ping just failed, before it is
+/// reported lost.
+///
+/// A single failed ping used to be the verdict. Most failures worth having a
+/// heartbeat for are brief, though — a VPN reconnecting, a laptop waking, an
+/// SSH tunnel redialling a session a firewall dropped — and reporting each one
+/// put a card with a Reconnect button in front of the user for a connection
+/// that was back before they could click it. Twenty seconds of patience in
+/// total, after which the connection really is unreachable.
+const RETRY_AFTER: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(15)];
+
+/// How often a connection already reported lost is checked again.
+///
+/// The loop used to end at the first failure, so recovery was entirely
+/// manual. It now keeps watching, more often than the healthy interval because
+/// someone is waiting on the answer, and reports the connection restored the
+/// moment it answers.
+const LOST_RECHECK: Duration = Duration::from_secs(30);
 
 /// Owns the background keepalive task for one connection pool. Dropping it
 /// (pool removed on `disconnect`, or replaced by a fresh `connect` /
@@ -71,9 +99,14 @@ impl Drop for KeepaliveHandle {
 
 /// Spawn a background task that pings `pool` every `interval`.
 ///
-/// A failed ping is reported once via [`CONNECTION_LOST_EVENT`] and ends
-/// the loop — the pool is left in place (still broken) until the user
-/// reconnects, which opens a fresh pool and starts a new heartbeat.
+/// A failed ping is retried ([`RETRY_AFTER`]) before the connection is
+/// reported lost via [`CONNECTION_LOST_EVENT`]. The loop then keeps checking
+/// every [`LOST_RECHECK`] and reports [`CONNECTION_RESTORED_EVENT`] when the
+/// connection answers again, which it usually does without anyone touching
+/// it: the pool replaces sockets that fail their check
+/// (`db::pool::check_before_use`) and an SSH tunnel redials a dead session
+/// (`db::ssh::TunnelSession`). A manual reconnect still opens a fresh pool and
+/// a fresh heartbeat, as before.
 ///
 /// `last_used` is the [`crate::state::ActivePool`]'s usage stamp; a tick whose
 /// interval the user's own queries already spanned is skipped, since traffic
@@ -103,40 +136,90 @@ pub fn spawn(
     let cancel = CancellationToken::new();
     let cancel_loop = cancel.clone();
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = cancel_loop.cancelled() => return,
-                _ = tokio::time::sleep(interval) => {}
-            }
-            let idle = crate::state::now_millis().saturating_sub(last_used.load(Ordering::Relaxed));
-            if idle < interval.as_millis() as u64 {
-                continue;
-            }
-            if let Err(e) = crate::error::with_timeout_secs(
+        let ping = || {
+            crate::error::with_timeout_secs(
                 ping_timeout,
                 "keepalive ping",
                 crate::db::exec::ping(&pool),
             )
-            .await
-            {
-                let msg = e.to_string();
-                log_bus::broadcast(
-                    &app,
-                    LogEntry::new(LogKind::Connection)
-                        .connection_id(connection_id.clone())
-                        .message("keepalive: ping failed, flagging connection as lost")
-                        .error(&msg),
-                );
-                let _ = app.emit(
-                    CONNECTION_LOST_EVENT,
-                    ConnectionLostPayload {
-                        connection_id: connection_id.clone(),
-                        error: msg,
-                    },
-                );
+        };
+        let mut lost = false;
+        loop {
+            let wait = if lost { LOST_RECHECK } else { interval };
+            if !sleep_or_cancel(&cancel_loop, wait).await {
                 return;
+            }
+            if !lost {
+                let idle =
+                    crate::state::now_millis().saturating_sub(last_used.load(Ordering::Relaxed));
+                if idle < interval.as_millis() as u64 {
+                    continue;
+                }
+            }
+
+            let mut result = ping().await;
+            // Retry only on the way *into* "lost". Once reported, each recheck
+            // is itself the retry.
+            if !lost {
+                for delay in RETRY_AFTER {
+                    if result.is_ok() {
+                        break;
+                    }
+                    if !sleep_or_cancel(&cancel_loop, delay).await {
+                        return;
+                    }
+                    result = ping().await;
+                }
+            }
+
+            match (result, lost) {
+                (Ok(()), false) => {}
+                (Ok(()), true) => {
+                    lost = false;
+                    log_bus::broadcast(
+                        &app,
+                        LogEntry::new(LogKind::Connection)
+                            .connection_id(connection_id.clone())
+                            .message("keepalive: connection answering again"),
+                    );
+                    let _ = app.emit(
+                        CONNECTION_RESTORED_EVENT,
+                        ConnectionRestoredPayload {
+                            connection_id: connection_id.clone(),
+                        },
+                    );
+                }
+                (Err(_), true) => {}
+                (Err(e), false) => {
+                    lost = true;
+                    let msg = e.to_string();
+                    log_bus::broadcast(
+                        &app,
+                        LogEntry::new(LogKind::Connection)
+                            .connection_id(connection_id.clone())
+                            .message(
+                                "keepalive: ping failed three times, flagging connection as lost",
+                            )
+                            .error(&msg),
+                    );
+                    let _ = app.emit(
+                        CONNECTION_LOST_EVENT,
+                        ConnectionLostPayload {
+                            connection_id: connection_id.clone(),
+                            error: msg,
+                        },
+                    );
+                }
             }
         }
     });
     Some(KeepaliveHandle { cancel })
+}
+
+/// Sleep for `wait`, or return `false` as soon as the heartbeat is cancelled.
+async fn sleep_or_cancel(cancel: &CancellationToken, wait: Duration) -> bool {
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        _ = tokio::time::sleep(wait) => true,
+    }
 }

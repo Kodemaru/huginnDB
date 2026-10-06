@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **Connections through an SSH tunnel dropped after a while and never came
+  back on their own.**
+  - The tunnel sent no keepalive of its own, so a firewall or router that
+    clears idle connections could silently kill it.
+  - Once it was dead, every query through it failed until you reconnected by
+    hand.
+  - Tunnels now send their own keepalive every 30 seconds, and a tunnel whose
+    session has died reconnects by itself the next time it is used.
+- **A lost connection needed a manual reconnect even after it came back.**
+  - HuginnDB now retries twice before reporting a connection as lost, so a
+    momentary blip (a VPN reconnecting, a laptop waking up) no longer raises an
+    alert.
+  - It also keeps checking a lost connection. When it answers again, the
+    warning and its **Reconnect** button go away and you're told the
+    connection was restored.
+- **A query after a long pause could wait 30 seconds and then claim the server
+  had too many connections.**
+  - Each connection is checked before it is used. If that check got no answer
+    (a connection the network had dropped in silence), it was never abandoned:
+    the query waited the full 30 seconds and the timeout was reported as the
+    server being full.
+  - The check now gives up after 5 seconds, and the query simply gets a fresh
+    connection. SQL Server connections, which were not checked at all, now
+    get the same check.
+- **Expanding a database on an SSH-tunnelled connection was slow.**
+  - Every database you expanded opened a whole new SSH session to the bastion
+    before its first query.
+  - It now reuses the tunnel its connection already has, which makes opening a
+    database more than twice as fast over a typical tunnel (about 0.8 s down to
+    about 0.3 s).
+
 - **Closing a window left its connections open.** A connection opened in a
   secondary window stayed open on the server after that window was closed,
   until HuginnDB itself exited. No remaining window listed it, so nothing

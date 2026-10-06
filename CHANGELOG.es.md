@@ -10,6 +10,38 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ### Corregido
 
+- **Las conexiones a través de un túnel SSH se caían pasado un rato y no
+  volvían solas.**
+  - El túnel no enviaba ningún keepalive propio, así que un firewall o un router
+    que cierra las conexiones inactivas podía cortarlo sin avisar.
+  - Una vez caído, todas las consultas que pasaban por él fallaban hasta
+    reconectar a mano.
+  - Ahora los túneles envían su propio keepalive cada 30 segundos, y un túnel
+    cuya sesión se ha caído se reconecta solo la siguiente vez que se usa.
+- **Una conexión perdida había que reconectarla a mano aunque ya hubiera
+  vuelto.**
+  - HuginnDB reintenta ahora dos veces antes de dar una conexión por perdida,
+    así que un corte momentáneo (una VPN que se reconecta, un portátil que sale
+    de suspensión) ya no lanza una alerta.
+  - Además, sigue comprobando una conexión perdida. Cuando vuelve a responder,
+    desaparecen el aviso y su botón **Reconectar**, y se te informa de que la
+    conexión se ha recuperado.
+- **Una consulta tras una pausa larga podía esperar 30 segundos y luego decir
+  que el servidor tenía demasiadas conexiones.**
+  - Cada conexión se comprueba antes de usarla. Si esa comprobación no recibía
+    respuesta (una conexión que la red había cortado en silencio), nunca se
+    abandonaba: la consulta esperaba los 30 segundos completos y el tiempo de
+    espera se presentaba como un servidor lleno.
+  - Ahora la comprobación se rinde a los 5 segundos y la consulta recibe sin
+    más una conexión nueva. Las conexiones a SQL Server, que no se comprobaban
+    en absoluto, pasan ahora por la misma comprobación.
+- **Desplegar una base de datos en una conexión con túnel SSH era lento.**
+  - Cada base de datos que desplegabas abría una sesión SSH completa nueva con
+    el bastión antes de su primera consulta.
+  - Ahora reutiliza el túnel que ya tiene su conexión, lo que hace que abrir una
+    base de datos sea más del doble de rápido en un túnel típico (de unos 0,8 s
+    a unos 0,3 s).
+
 - **Cerrar una ventana dejaba abiertas sus conexiones.** Una conexión abierta
   en una ventana secundaria seguía abierta en el servidor después de cerrar esa
   ventana, hasta que se cerraba el propio HuginnDB. Ninguna otra ventana la
