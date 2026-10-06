@@ -641,7 +641,7 @@ pub async fn list_tables(
         state.inner(),
         &connection_id,
         "list_tables",
-        list_tables_inner(state.inner(), &connection_id),
+        list_table_names_inner(state.inner(), &connection_id),
     )
     .await?;
     Ok(crate::commands::guard::tables(
@@ -651,16 +651,92 @@ pub async fn list_tables(
     ))
 }
 
-/// Borrowed-state core of [`list_tables`], reused by the headless MCP
-/// `list_tables` tool. The `_database` argument the command accepts is unused
-/// (the pool is already bound to one database), so the inner form drops it.
+/// Borrowed-state core of the **complete** table listing — names *and* every
+/// driver's approximate row counts and sizes — reused by the headless MCP
+/// `list_tables` tool, the dump's progress estimate and the bridge. The
+/// `_database` argument the command accepts is unused (the pool is already
+/// bound to one database), so the inner form drops it.
+///
+/// Not what the schema tree draws from any more: see
+/// [`list_table_names_inner`].
 pub async fn list_tables_inner(state: &AppState, connection_id: &str) -> AppResult<Vec<TableInfo>> {
     match state.pool_for(connection_id)? {
         DbPool::Postgres(p) => crate::db::postgres::schema::list_tables(&p).await,
         DbPool::Mysql(p) => crate::db::mysql::schema::list_tables(&p).await,
         DbPool::Sqlite(p) => crate::db::sqlite::schema::list_tables(&p).await,
-        DbPool::Mongo(conn) => crate::db::mongo::schema::list_collections(&conn).await,
+        DbPool::Mongo(conn) => crate::db::mongo::schema::list_collections_with_stats(&conn).await,
         DbPool::MsSql(p) => crate::db::mssql::schema::list_tables(&p).await,
+    }
+}
+
+/// The listing a person is waiting on: [`list_tables_inner`] minus any figure
+/// that costs a round trip **per relation**.
+///
+/// Only MongoDB differs. The SQL drivers read counts and sizes from one
+/// statistics catalog in the same query that lists the tables, so leaving them
+/// out would save nothing. MongoDB has no such catalog — each collection's
+/// count is its own command — and behind an SSH tunnel those commands were
+/// nearly the whole of the wait before a database's collections appeared. The
+/// tree asks for them afterwards through [`get_table_stats`].
+///
+/// Explicit arms, no `_ =>` (gotcha #30): a new driver states which half it
+/// belongs to.
+pub async fn list_table_names_inner(
+    state: &AppState,
+    connection_id: &str,
+) -> AppResult<Vec<TableInfo>> {
+    match state.pool_for(connection_id)? {
+        DbPool::Mongo(conn) => crate::db::mongo::schema::list_collections(&conn).await,
+        DbPool::Postgres(_) | DbPool::Mysql(_) | DbPool::Sqlite(_) | DbPool::MsSql(_) => {
+            list_tables_inner(state, connection_id).await
+        }
+    }
+}
+
+/// The per-relation figures [`list_tables`] left out, for the schema tree to
+/// fill its badges in after the names are already on screen.
+///
+/// Returns the same [`TableInfo`] rows as [`list_tables_inner`], so the
+/// frontend merges by `(schema, name)` and the visibility filter is the one
+/// the listing itself goes through. **Empty for every driver whose listing
+/// already carried its figures** — answered without touching the server, so
+/// the frontend can call this unconditionally rather than knowing which
+/// drivers need it.
+#[tauri::command]
+pub async fn get_table_stats(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> AppResult<Vec<TableInfo>> {
+    crate::commands::ensure_view(&app, &window, state.inner(), &connection_id).await;
+    crate::commands::guard::endpoint(state.inner(), &connection_id)?;
+    let stats = crate::error::with_timeout_for(
+        state.inner(),
+        &connection_id,
+        "get_table_stats",
+        get_table_stats_inner(state.inner(), &connection_id),
+    )
+    .await?;
+    // Rows name relations, so they are filtered like the list itself.
+    Ok(crate::commands::guard::tables(
+        state.inner(),
+        &connection_id,
+        stats,
+    ))
+}
+
+/// Borrowed-state core of [`get_table_stats`]. Explicit arms (gotcha #30).
+pub async fn get_table_stats_inner(
+    state: &AppState,
+    connection_id: &str,
+) -> AppResult<Vec<TableInfo>> {
+    match state.pool_for(connection_id)? {
+        DbPool::Mongo(conn) => crate::db::mongo::schema::list_collections_with_stats(&conn).await,
+        // Already in `list_tables`' answer; see `list_table_names_inner`.
+        DbPool::Postgres(_) | DbPool::Mysql(_) | DbPool::Sqlite(_) | DbPool::MsSql(_) => {
+            Ok(Vec::new())
+        }
     }
 }
 

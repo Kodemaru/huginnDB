@@ -188,6 +188,18 @@ interface SchemaState {
    */
   loadDatabaseSizes: (connectionId: string) => Promise<void>;
   /**
+   * Fill in the row-count and size badges `refresh` left blank.
+   *
+   * Started by `refresh` and never awaited by it, for the reason
+   * `api.getTableStats` exists: on MongoDB each collection's figures are their
+   * own command, and behind an SSH tunnel waiting for all of them was nearly the
+   * whole delay before a database's collections appeared. A no-op when the
+   * listing already carried its figures (every SQL driver).
+   *
+   * Failure is swallowed, like `loadDatabaseSizes`: this is a badge.
+   */
+  loadTableStats: (connectionId: string) => Promise<void>;
+  /**
    * Open an empty slice for `connectionId` without fetching anything — a
    * no-op when one already exists.
    *
@@ -232,6 +244,45 @@ function emptyState(): ConnectionSchema {
 /** Stable cache key for a (schema, table) pair. */
 export function tableKey(schema: string | undefined, table: string) {
   return `${schema ?? ""}.${table}`;
+}
+
+/**
+ * Whether a listing came back without the per-relation figures, so that
+ * `loadTableStats` has something to fill in.
+ *
+ * Read off the rows rather than the driver because the store does not know
+ * the driver, and because it is the rows that matter: a listing where any
+ * relation already carries a count or a size is one whose driver reads them
+ * from a catalog in the same query, and asking again would be a wasted call.
+ */
+export function needsTableStats(tables: TableInfo[]): boolean {
+  return (
+    tables.length > 0 &&
+    tables.every((t) => t.row_count == null && t.size_bytes == null)
+  );
+}
+
+/**
+ * Fold `getTableStats` rows into a listing by `(schema, name)`.
+ *
+ * Returns the same array when nothing changed, so a stats answer for a table
+ * list that has since been replaced costs no re-render. A row the listing no
+ * longer has is ignored rather than added: the listing decides what exists.
+ */
+export function mergeTableStats(
+  tables: TableInfo[],
+  stats: TableInfo[],
+): TableInfo[] {
+  if (stats.length === 0) return tables;
+  const byKey = new Map(stats.map((s) => [tableKey(s.schema, s.name), s]));
+  let changed = false;
+  const merged = tables.map((t) => {
+    const s = byKey.get(tableKey(t.schema, t.name));
+    if (!s || (s.row_count == null && s.size_bytes == null)) return t;
+    changed = true;
+    return { ...t, row_count: s.row_count, size_bytes: s.size_bytes };
+  });
+  return changed ? merged : tables;
 }
 
 export const useSchema = create<SchemaState>((set, get) => ({
@@ -307,6 +358,10 @@ export const useSchema = create<SchemaState>((set, get) => ({
           },
         };
       });
+      // Badges after the names, never before them — and not awaited, so a
+      // caller awaiting `refresh` (connecting, the warm scheduler) is not held
+      // up by figures nobody is blocked on.
+      if (needsTableStats(tables)) void get().loadTableStats(connectionId);
       // Re-populate what the user has open, so an expanded table comes back
       // with its (now current) columns instead of an empty node the guard
       // above would never fill on its own.
@@ -549,6 +604,29 @@ export const useSchema = create<SchemaState>((set, get) => ({
             databaseSizesLoading: false,
             databaseSizesLoaded: true,
           },
+        },
+      };
+    });
+  },
+  loadTableStats: async (connectionId) => {
+    let stats: TableInfo[];
+    try {
+      stats = await api.getTableStats(connectionId);
+    } catch {
+      // Swallowed by design, like `loadDatabaseSizes`: an engine or a role
+      // that will not answer costs the badges, and the names are already up.
+      return;
+    }
+    set((state) => {
+      const current = state.byConnection[connectionId];
+      // Dropped while in flight: writing would resurrect the slice.
+      if (!current) return state;
+      const tables = mergeTableStats(current.tables, stats);
+      if (tables === current.tables) return state;
+      return {
+        byConnection: {
+          ...state.byConnection,
+          [connectionId]: { ...current, tables },
         },
       };
     });

@@ -472,6 +472,15 @@ export const api = {
   listTables: (connectionId: string, database?: string) =>
     invoke<TableInfo[]>("list_tables", { connectionId, database }),
 
+  /**
+   * The row counts and sizes `listTables` left out because they cost a round
+   * trip per relation (MongoDB only — every other driver answers `[]` without
+   * touching the server, since its listing already carried them). Never
+   * awaited alongside `listTables`: the point is that the tree draws first.
+   */
+  getTableStats: (connectionId: string) =>
+    invoke<TableInfo[]>("get_table_stats", { connectionId }),
+
   listColumns: (
     connectionId: string,
     schema: string | undefined,

@@ -231,6 +231,7 @@ pub(crate) const HUMAN_POLICY: &[(&str, &str)] = &[
     ("schema::list_databases", "list"),
     ("schema::get_database_sizes", "list"),
     ("schema::list_tables", "list"),
+    ("schema::get_table_stats", "list"),
     ("schema::list_columns", "read"),
     ("schema::list_indexes", "read"),
     ("schema::list_referencing_foreign_keys", "read"),

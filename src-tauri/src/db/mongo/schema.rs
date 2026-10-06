@@ -13,8 +13,11 @@ use crate::commands::schema::{
 use crate::db::ddl::{ColumnDef, IndexDef, TableStructure};
 use crate::error::{AppError, AppResult};
 use crate::state::MongoConn;
-use mongodb::bson::{doc, Document};
+use futures_util::stream::{self, StreamExt};
+use mongodb::bson::{doc, Bson, Document};
 use mongodb::results::CollectionType;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Number of documents sampled when inferring a collection's field list.
@@ -110,51 +113,122 @@ pub async fn database_sizes(conn: &MongoConn) -> AppResult<Vec<DatabaseSize>> {
     }
 }
 
-/// List the collections (and views) of the target database, with approximate
-/// document counts and on-disk sizes.
-pub async fn list_collections(conn: &MongoConn) -> AppResult<Vec<TableInfo>> {
-    // A parent cluster connection has no database selected yet — the explorer
-    // browses collections only after the user expands a specific database (a
-    // synthetic `<id>::db::<name>` child pool is opened then). Return empty
-    // rather than erroring via `resolve_db`, mirroring MySQL's `list_tables`
-    // returning `Ok(vec![])` when `SELECT DATABASE()` is NULL. Without this the
-    // frontend's parallel `listDatabases()` + `listTables()` boot probe rejects
-    // and blanks the entire tree for a multi-DB Mongo connection (#52).
+/// One `listCollections` row: the collection's name and whether it is a view.
+struct CollectionSpec {
+    name: String,
+    is_view: bool,
+}
+
+/// Read the target database's catalog: one round trip, no statistics.
+///
+/// `None` for a parent cluster connection with no database selected — the
+/// explorer browses collections only after the user expands a specific
+/// database (a synthetic `<id>::db::<name>` child pool is opened then). The
+/// callers answer that with an empty list rather than erroring via
+/// `resolve_db`, mirroring MySQL's `list_tables` returning `Ok(vec![])` when
+/// `SELECT DATABASE()` is NULL. Without this the frontend's parallel
+/// `listDatabases()` + `listTables()` boot probe rejects and blanks the entire
+/// tree for a multi-DB Mongo connection (#52).
+async fn read_catalog(conn: &MongoConn) -> AppResult<Option<(String, Vec<CollectionSpec>)>> {
     if no_database_selected(conn) {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let db = resolve_db(conn)?;
-    let db_name = db.name().to_string();
-
-    let sizes = collection_sizes(&db, &db_name).await;
-
     let mut cursor = db.list_collections().await?;
-    let mut out = Vec::new();
+    let mut specs = Vec::new();
     while cursor.advance().await? {
         let spec = cursor.deserialize_current()?;
-        let is_view = spec.collection_type == CollectionType::View;
-        let row_count = if is_view {
-            None
-        } else {
-            // estimated_document_count uses collection metadata: a single fast
-            // call, unlike a full COUNT scan.
-            db.collection::<Document>(&spec.name)
-                .estimated_document_count()
-                .await
-                .ok()
-        };
-        out.push(TableInfo {
-            schema: db_name.clone(),
-            size_bytes: sizes.get(&spec.name).copied(),
+        specs.push(CollectionSpec {
+            is_view: spec.collection_type == CollectionType::View,
             name: spec.name,
-            kind: if is_view {
-                "view".into()
-            } else {
-                "table".into()
-            },
-            row_count,
         });
     }
+    Ok(Some((db.name().to_string(), specs)))
+}
+
+fn table_info(db_name: &str, spec: CollectionSpec, stats: CollectionStats) -> TableInfo {
+    TableInfo {
+        schema: db_name.to_string(),
+        name: spec.name,
+        kind: if spec.is_view {
+            "view".into()
+        } else {
+            "table".into()
+        },
+        row_count: stats.count,
+        size_bytes: stats.size_bytes,
+    }
+}
+
+/// List the collections (and views) of the target database **without** their
+/// statistics — a single catalog round trip.
+///
+/// This is what the schema tree draws from. Document counts and sizes cost a
+/// round trip *per collection*, and behind an SSH tunnel that was the whole of
+/// the wait: a database with ninety-odd collections took two and a half seconds
+/// to appear, nearly all of it spent on the badges. The tree now shows the
+/// names at once and asks for the figures separately
+/// ([`list_collections_with_stats`] through `get_table_stats`), the same split
+/// `get_database_sizes` already makes for databases.
+pub async fn list_collections(conn: &MongoConn) -> AppResult<Vec<TableInfo>> {
+    let Some((db_name, specs)) = read_catalog(conn).await? else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<TableInfo> = specs
+        .into_iter()
+        .map(|spec| table_info(&db_name, spec, CollectionStats::default()))
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// [`list_collections`] plus each collection's approximate document count and
+/// on-disk size.
+///
+/// For every caller that wants the figures and is not a person waiting on a
+/// tree: the schema tree's deferred badge pass, the MCP `list_tables` tool,
+/// the dump's progress estimate.
+///
+/// One stats read per collection, several in flight at once. This used to be
+/// an `estimated_document_count` per collection awaited inside the catalog
+/// loop — strictly sequential. Concurrency halves the wait behind a tunnel
+/// rather than dividing it by [`COLL_STATS_CONCURRENCY`] (measured: 2.6 s to
+/// 1.3–1.8 s for 96 collections), which is why the tree no longer waits for
+/// this at all. `buffered` keeps the output in catalog order.
+pub async fn list_collections_with_stats(conn: &MongoConn) -> AppResult<Vec<TableInfo>> {
+    let Some((db_name, specs)) = read_catalog(conn).await? else {
+        return Ok(Vec::new());
+    };
+    let db = resolve_db(conn)?;
+    // Owned values into each future rather than borrows: a stream of futures
+    // borrowing from this frame trips the higher-ranked lifetime check that a
+    // `Send` Tauri command future imposes. `Database` is an `Arc` handle, so
+    // the clones are cheap.
+    let stats_denied = Arc::new(AtomicBool::new(false));
+    let jobs: Vec<(String, bool)> = specs.iter().map(|s| (s.name.clone(), s.is_view)).collect();
+    let stats: Vec<CollectionStats> = stream::iter(jobs)
+        .map(|(name, is_view)| {
+            let db = db.clone();
+            let stats_denied = Arc::clone(&stats_denied);
+            async move {
+                // A view has no storage of its own to report, and counting one
+                // would run its whole pipeline.
+                if is_view {
+                    CollectionStats::default()
+                } else {
+                    collection_stats(&db, &name, &stats_denied).await
+                }
+            }
+        })
+        .buffered(COLL_STATS_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut out: Vec<TableInfo> = specs
+        .into_iter()
+        .zip(stats)
+        .map(|(spec, stats)| table_info(&db_name, spec, stats))
+        .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
@@ -257,48 +331,144 @@ async fn reject_view_rename(db: &mongodb::Database, name: &str) -> AppResult<()>
     Ok(())
 }
 
-/// On-disk size (data + indexes) per collection name, sourced from a single
-/// `$collStats` aggregation run at the database level — one round trip for
-/// every collection at once, rather than a `collStats` command per collection
-/// (the N+1 cost this was originally deferred over). Best-effort: an older
-/// server or a role without the `collStats` privilege just leaves sizes
-/// unknown (empty map) instead of failing the whole listing.
-async fn collection_sizes(
+/// How many per-collection stats reads [`list_collections_with_stats`] keeps
+/// in flight.
+///
+/// Below the five-connection pool a person's connection is granted, so a
+/// database listing never queues behind itself and leaves a socket free for
+/// the grid the user may be waiting on at the same moment. The MCP's
+/// two-connection pool simply queues the excess inside the driver, which is
+/// still far better than the strictly sequential loop this replaced.
+const COLL_STATS_CONCURRENCY: usize = 4;
+
+/// What [`list_collections_with_stats`] reports per collection besides its name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CollectionStats {
+    count: Option<u64>,
+    size_bytes: Option<u64>,
+}
+
+/// Document count and on-disk size (data + indexes) of one collection, in one
+/// round trip.
+///
+/// `$collStats` with `storageStats` answers both from WiredTiger's metadata —
+/// no scan — which is the same cost `estimated_document_count` already had, so
+/// the size comes for free.
+///
+/// This replaced a single `$collStats` run through `Database::aggregate`, which
+/// **never worked**: `$collStats` is a collection-level stage that a
+/// database-level aggregation does not accept, and since the call was
+/// best-effort its error was swallowed and no MongoDB collection ever showed a
+/// size. The parse had a second, independent bug that would have hidden the
+/// sizes even had the stage run: it read them with `get_i64`, and the server
+/// answers small collections' figures as `Int32`. See [`stats_from_docs`].
+///
+/// Falls back to `estimated_document_count` — the behaviour before this
+/// existed, minus the size — when the stats read fails, which is what a role
+/// without the `collStats` privilege gets. The first such failure sets
+/// `denied`, so a listing under that role pays for the refused stage a handful
+/// of times (however many were already in flight) rather than once per
+/// collection.
+async fn collection_stats(
     db: &mongodb::Database,
-    db_name: &str,
-) -> std::collections::HashMap<String, u64> {
-    let mut sizes = std::collections::HashMap::new();
-    let Ok(mut cursor) = db
-        .aggregate(vec![doc! {"$collStats": {"storageStats": {}}}])
-        .await
-    else {
-        return sizes;
-    };
-    let prefix = format!("{db_name}.");
-    while matches!(cursor.advance().await, Ok(true)) {
-        let Ok(stat) = cursor.deserialize_current() else {
-            continue;
-        };
-        let name = stat
-            .get_str("ns")
-            .ok()
-            .and_then(|ns| ns.strip_prefix(&prefix));
-        let Some(name) = name else { continue };
-        let size = stat
-            .get_document("storageStats")
-            .ok()
-            .and_then(|s| {
-                s.get_i64("totalSize")
-                    .or_else(|_| s.get_i64("storageSize"))
-                    .or_else(|_| s.get_i64("size"))
-                    .ok()
-            })
-            .map(|n| n.max(0) as u64);
-        if let Some(size) = size {
-            sizes.insert(name.to_string(), size);
+    name: &str,
+    denied: &AtomicBool,
+) -> CollectionStats {
+    let coll = db.collection::<Document>(name);
+    if !denied.load(Ordering::Relaxed) {
+        let pipeline = vec![
+            doc! {"$collStats": {"storageStats": {}}},
+            // `storageStats` carries WiredTiger's whole per-collection report
+            // (tens of KB on a collection with many indexes); keep only what
+            // the tree shows rather than shipping that through a tunnel.
+            doc! {"$project": {
+                "storageStats.count": 1,
+                "storageStats.totalSize": 1,
+                "storageStats.storageSize": 1,
+                "storageStats.size": 1,
+            }},
+        ];
+        match coll.aggregate(pipeline).await {
+            Ok(mut cursor) => {
+                let mut docs = Vec::new();
+                while let Ok(true) = cursor.advance().await {
+                    if let Ok(d) = cursor.deserialize_current() {
+                        docs.push(d);
+                    }
+                }
+                let stats = stats_from_docs(&docs);
+                if stats.count.is_some() {
+                    return stats;
+                }
+                // Answered, but without a count (an unusual storage engine):
+                // keep the size and still try the estimate below.
+                return CollectionStats {
+                    count: coll.estimated_document_count().await.ok(),
+                    ..stats
+                };
+            }
+            // Only a refusal stops the others from trying. Any other failure is
+            // about *this* collection (a system namespace, an exotic type) and
+            // must not cost every other collection in the listing its size.
+            Err(e) if is_unauthorized(&e) => denied.store(true, Ordering::Relaxed),
+            Err(_) => {}
         }
     }
-    sizes
+    CollectionStats {
+        count: coll.estimated_document_count().await.ok(),
+        size_bytes: None,
+    }
+}
+
+/// Fold the documents a `$collStats` stage returned into one collection's
+/// figures.
+///
+/// Several documents, not one, because a **sharded** collection answers with
+/// one per shard, and its count and size are the sums. A shard that omits a
+/// figure contributes nothing; a figure no document carries stays `None`
+/// rather than becoming a misleading zero.
+///
+/// Every width the server might use is accepted. `Int32` is the case that
+/// matters: it is what a small collection's figures arrive as, and reading
+/// them with `get_i64` is why sizes never appeared.
+fn stats_from_docs(docs: &[Document]) -> CollectionStats {
+    let mut count: Option<u64> = None;
+    let mut size: Option<u64> = None;
+    for d in docs {
+        let Ok(storage) = d.get_document("storageStats") else {
+            continue;
+        };
+        if let Some(n) = storage.get("count").and_then(bson_u64) {
+            count = Some(count.unwrap_or(0) + n);
+        }
+        let shard_size = ["totalSize", "storageSize", "size"]
+            .iter()
+            .find_map(|k| storage.get(*k).and_then(bson_u64));
+        if let Some(n) = shard_size {
+            size = Some(size.unwrap_or(0) + n);
+        }
+    }
+    CollectionStats {
+        count,
+        size_bytes: size,
+    }
+}
+
+/// Whether the server refused a command for lack of privilege (`Unauthorized`,
+/// code 13) — the answer every collection in the database will get, as
+/// opposed to a failure particular to one of them.
+fn is_unauthorized(e: &mongodb::error::Error) -> bool {
+    matches!(e.kind.as_ref(), mongodb::error::ErrorKind::Command(c) if c.code == 13)
+}
+
+/// A non-negative BSON number as `u64`, whatever width the server chose.
+fn bson_u64(value: &Bson) -> Option<u64> {
+    match value {
+        Bson::Int32(v) => Some((*v).max(0) as u64),
+        Bson::Int64(v) => Some((*v).max(0) as u64),
+        Bson::Double(v) if v.is_finite() => Some(v.max(0.0) as u64),
+        _ => None,
+    }
 }
 
 /// What the catalog says a name is, for the two introspection decisions that
@@ -831,6 +1001,61 @@ pub async fn ping(conn: &MongoConn) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Folding `$collStats` output into the tree's count and size
+    // -----------------------------------------------------------------------
+
+    /// The shape a real server returned for a 185 600-document collection:
+    /// every figure an `Int32`. Reading these with `get_i64` is why MongoDB
+    /// collections never showed a size.
+    #[test]
+    fn int32_figures_are_read_rather_than_dropped() {
+        let stats = stats_from_docs(&[doc! {
+            "ns": "iMesPyme.pallet",
+            "storageStats": { "count": 185_600_i32, "size": 155_685_543_i32, "totalSize": 58_978_304_i32 },
+        }]);
+        assert_eq!(stats.count, Some(185_600));
+        // `totalSize` (data + indexes on disk) wins over the uncompressed `size`.
+        assert_eq!(stats.size_bytes, Some(58_978_304));
+    }
+
+    #[test]
+    fn every_number_width_is_accepted() {
+        let stats = stats_from_docs(&[doc! {
+            "storageStats": { "count": 5_000_000_000_i64, "storageSize": 1024.0_f64 },
+        }]);
+        assert_eq!(stats.count, Some(5_000_000_000));
+        assert_eq!(stats.size_bytes, Some(1024));
+    }
+
+    /// A sharded collection answers with one document per shard; the
+    /// collection's figures are the sums, not whichever shard came first.
+    #[test]
+    fn a_sharded_collection_sums_its_shards() {
+        let stats = stats_from_docs(&[
+            doc! { "shard": "a", "storageStats": { "count": 10_i32, "totalSize": 100_i32 } },
+            doc! { "shard": "b", "storageStats": { "count": 32_i64, "totalSize": 400_i64 } },
+        ]);
+        assert_eq!(stats.count, Some(42));
+        assert_eq!(stats.size_bytes, Some(500));
+    }
+
+    /// No figure is not a zero: an unknown size must render as unknown.
+    #[test]
+    fn a_missing_figure_stays_unknown() {
+        assert_eq!(stats_from_docs(&[]), CollectionStats::default());
+        let stats = stats_from_docs(&[doc! { "storageStats": { "count": 7_i32 } }]);
+        assert_eq!(stats.count, Some(7));
+        assert_eq!(stats.size_bytes, None);
+    }
+
+    #[test]
+    fn negative_or_non_numeric_figures_never_become_huge_unsigned_values() {
+        assert_eq!(bson_u64(&Bson::Int32(-1)), Some(0));
+        assert_eq!(bson_u64(&Bson::Double(f64::NAN)), None);
+        assert_eq!(bson_u64(&Bson::String("12".into())), None);
+    }
 
     // -----------------------------------------------------------------------
     // Classifying a relation from its `listCollections` spec
