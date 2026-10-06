@@ -891,6 +891,17 @@ impl ActiveConnections {
         })
     }
 
+    /// [`Self::get`] for a background task: the pool, **without** stamping
+    /// `last_used`.
+    ///
+    /// For work nobody asked for — Pulse's sampler — which must not keep a
+    /// pool looking busy. Stamping is how the reapers tell a connection in use
+    /// from one that can go; a background reader that stamps makes every pool
+    /// it touches immortal.
+    pub fn peek(&self, id: &str) -> Option<DbPool> {
+        self.inner.get(id).map(|a| a.pool.clone())
+    }
+
     /// Synthetic per-database children of `parent_id`, oldest use first.
     ///
     /// The ordering is what makes the per-parent cap an LRU rather than an
@@ -1405,6 +1416,35 @@ mod tests {
             holders: by.iter().map(|s| s.to_string()).collect(),
             ..ActivePool::bare(dummy_pool())
         }
+    }
+
+    /// Pulse samples every minute through `peek`. If that counted as use, a
+    /// bridge pool for a Pulse-enabled profile would never go idle and never be
+    /// reaped — gotcha #67's permanent pool, by another route.
+    #[tokio::test]
+    async fn a_background_peek_is_not_use() {
+        let mut conns = ActiveConnections::default();
+        conns.insert(
+            "p".into(),
+            ActivePool {
+                origin: PoolOrigin::Bridge,
+                ..ActivePool::bare(dummy_pool())
+            },
+        );
+        conns
+            .inner
+            .get("p")
+            .unwrap()
+            .last_used
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(conns.peek("p").is_some());
+        assert_eq!(
+            conns.idle_bridge_pools(10_000, 5_000),
+            vec!["p".to_string()]
+        );
+        // Whereas a real lookup is use, and takes it off the reaper's list.
+        assert!(conns.get("p").is_some());
+        assert!(conns.idle_bridge_pools(now_millis(), 5_000).is_empty());
     }
 
     #[tokio::test]
