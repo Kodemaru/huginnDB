@@ -367,6 +367,14 @@ pub fn run() {
                 let _ = window
                     .app_handle()
                     .emit(commands::connection::WINDOW_LIST_CHANGED_EVENT, ());
+                // And the connections only this window was using go with it —
+                // see `ActivePool::holders`. Spawned: closing awaits the
+                // server, and this handler runs on the event loop.
+                let app = window.app_handle().clone();
+                let label = window.label().to_string();
+                tauri::async_runtime::spawn(async move {
+                    commands::connection::release_window(&app, &label).await;
+                });
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -556,8 +564,22 @@ pub fn run() {
             commands::updater::get_auto_update_status,
             commands::updater::note_update_check,
         ])
-        .run(context())
-        .expect("error while running HuginnDB");
+        .build(context())
+        .expect("error while building HuginnDB")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager;
+                // Close every pool the windows left open, rather than letting
+                // the process exit drop them — see `close_all_pools`. Three
+                // seconds at most: a quit that hangs on a dead server is worse
+                // than the sessions that server will reap on its own.
+                let state = app.state::<state::AppState>();
+                tauri::async_runtime::block_on(commands::connection::close_all_pools(
+                    state.inner(),
+                    std::time::Duration::from_secs(3),
+                ));
+            }
+        });
 }
 
 /// The bundle's generated context, shared by the interface and the headless

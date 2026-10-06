@@ -10,6 +10,26 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ### Corregido
 
+- **Cerrar una ventana dejaba abiertas sus conexiones.** Una conexión abierta
+  en una ventana secundaria seguía abierta en el servidor después de cerrar esa
+  ventana, hasta que se cerraba el propio HuginnDB. Ninguna otra ventana la
+  mostraba, así que no había forma de cerrarla. Ahora una conexión se cierra
+  cuando lo hace la última ventana que la usa, y una pestaña flotante o una
+  ventana de Pulse cuentan como ventanas que usan la conexión que muestran.
+- **Al salir de HuginnDB sus conexiones no se cerraban como es debido.** Las
+  conexiones abiertas simplemente se descartaban al salir de la app. Un
+  servidor detrás de un túnel SSH o de un pooler de conexiones podía seguir
+  contando esas sesiones contra su límite de conexiones hasta que saltaban sus
+  propios tiempos de espera. Ahora HuginnDB las cierra correctamente al salir,
+  esperando como mucho tres segundos.
+- **La misma conexión podía abrirse dos veces a la vez.** Si dos peticiones
+  para la misma conexión o base de datos llegaban a la vez, cada una podía
+  abrir su propio pool y ocupar durante un momento el doble de conexiones en
+  el servidor. Podía pasar con una ventana y el conector MCP, o con el árbol
+  desplegando una base de datos mientras se ejecutaba una acción del menú
+  sobre ella. Ahora la segunda petición espera a la primera y reutiliza su
+  pool.
+
 - **Una base de datos desplegada se quedaba en blanco mientras cargaba.** El
   árbol de esquemas muestra ahora filas provisionales hasta que llegan las
   tablas de la base de datos, y un indicador de carga en la propia fila de la
