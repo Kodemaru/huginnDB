@@ -8,6 +8,22 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ## [Sin publicar]
 
+### Corregido
+
+- **Desplegar una base de datos MongoDB era lento a través de un túnel SSH.**
+  El árbol esperaba a tener el número de documentos de todas las colecciones
+  antes de mostrar ninguna, y además los pedía uno detrás de otro. Detrás de un
+  túnel, una base de datos con noventa y tantas colecciones tardaba más de dos
+  segundos en aparecer. Ahora las colecciones aparecen al momento (unos 25 ms
+  por el mismo túnel), y sus recuentos y tamaños se rellenan un instante
+  después, leídos varios a la vez.
+- **Las colecciones de MongoDB nunca mostraban su tamaño en el árbol.** La
+  lectura que debía traer los tamaños no podía funcionar contra una base de
+  datos entera, y su fallo se ignoraba en silencio. Ahora los tamaños salen de
+  la misma lectura por colección que el número de documentos, sin coste
+  añadido. Las colecciones fragmentadas (sharded) muestran el total de todos
+  sus shards.
+
 ## [1.31.1] — 2026-10-05
 
 ### Corregido

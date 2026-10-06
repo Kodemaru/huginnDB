@@ -21,6 +21,7 @@ const listTables = vi.fn<() => Promise<TableInfo[]>>();
 const listColumns = vi.fn<() => Promise<ColumnInfo[]>>();
 const listIndexes = vi.fn<() => Promise<IndexInfo[]>>();
 const getDatabaseSizes = vi.fn().mockResolvedValue({});
+const getTableStats = vi.fn<() => Promise<TableInfo[]>>();
 
 vi.mock("@/lib/tauri", () => ({
   api: {
@@ -29,6 +30,7 @@ vi.mock("@/lib/tauri", () => ({
     listColumns: (...a: unknown[]) => listColumns(...(a as [])),
     listIndexes: (...a: unknown[]) => listIndexes(...(a as [])),
     getDatabaseSizes: (...a: unknown[]) => getDatabaseSizes(...a),
+    getTableStats: (...a: unknown[]) => getTableStats(...(a as [])),
   },
 }));
 
@@ -41,7 +43,9 @@ vi.mock("@/lib/notify", () => ({
 }));
 vi.mock("@/lib/i18n", () => ({ default: { t: (k: string) => k } }));
 
-const { useSchema, tableKey } = await import("@/stores/session/schema");
+const { useSchema, tableKey, needsTableStats, mergeTableStats } = await import(
+  "@/stores/session/schema"
+);
 import type { ConnectionSchema } from "@/stores/session/schema";
 
 function table(name: string): TableInfo {
@@ -89,6 +93,70 @@ beforeEach(() => {
   listTables.mockResolvedValue([]);
   listColumns.mockResolvedValue([]);
   listIndexes.mockResolvedValue([]);
+  getTableStats.mockResolvedValue([]);
+});
+
+describe("deferred table stats", () => {
+  const bare = (name: string): TableInfo => ({ name, schema: "db", kind: "table" });
+
+  it("asks only when no relation came back with a figure", () => {
+    expect(needsTableStats([bare("a"), bare("b")])).toBe(true);
+    // A catalog-backed driver (MySQL's SHOW TABLE STATUS) already answered.
+    expect(needsTableStats([{ ...bare("a"), row_count: 0 }, bare("b")])).toBe(false);
+    // A multi-database parent lists nothing; there is nothing to fill in.
+    expect(needsTableStats([])).toBe(false);
+  });
+
+  it("merges by schema and name, and ignores rows the listing no longer has", () => {
+    const merged = mergeTableStats(
+      [bare("pallet"), bare("job")],
+      [
+        { ...bare("pallet"), row_count: 185600, size_bytes: 58978304 },
+        { ...bare("dropped_since"), row_count: 1 },
+      ],
+    );
+    expect(merged).toEqual([
+      { ...bare("pallet"), row_count: 185600, size_bytes: 58978304 },
+      bare("job"),
+    ]);
+  });
+
+  it("hands back the same array when there is nothing to merge", () => {
+    const tables = [bare("a")];
+    expect(mergeTableStats(tables, [])).toBe(tables);
+    expect(mergeTableStats(tables, [bare("a")])).toBe(tables);
+  });
+
+  it("draws the names without waiting for the figures, then fills them in", async () => {
+    listTables.mockResolvedValue([bare("pallet")]);
+    let answer!: (rows: TableInfo[]) => void;
+    getTableStats.mockReturnValue(new Promise((r) => (answer = r)));
+
+    // Resolves while the stats call is still pending.
+    await useSchema.getState().refresh("m1");
+    expect(useSchema.getState().byConnection.m1.tables).toEqual([bare("pallet")]);
+    expect(getTableStats).toHaveBeenCalledTimes(1);
+
+    answer([{ ...bare("pallet"), row_count: 3 }]);
+    await vi.waitFor(() =>
+      expect(useSchema.getState().byConnection.m1.tables[0].row_count).toBe(3),
+    );
+  });
+
+  it("does not ask when the listing already carried its figures", async () => {
+    listTables.mockResolvedValue([{ ...bare("t"), row_count: 10 }]);
+    await useSchema.getState().refresh("s1");
+    expect(getTableStats).not.toHaveBeenCalled();
+  });
+
+  it("a failed stats call costs the badges and nothing else", async () => {
+    listTables.mockResolvedValue([bare("pallet")]);
+    getTableStats.mockRejectedValue(new Error("not authorized"));
+    await useSchema.getState().refresh("m2");
+    await Promise.resolve();
+    expect(useSchema.getState().byConnection.m2.error).toBeNull();
+    expect(error).not.toHaveBeenCalled();
+  });
 });
 
 describe("refresh", () => {

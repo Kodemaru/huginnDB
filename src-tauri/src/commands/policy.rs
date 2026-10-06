@@ -121,7 +121,9 @@ pub async fn policy_generate_grants(
             // a pool is bound to, so each one is read through its own view.
             let child = crate::state::database_view_id(&parent, &db.name);
             crate::commands::ensure_view(&app, &window, state.inner(), &child).await;
-            for t in crate::commands::schema::list_tables_inner(state.inner(), &child).await? {
+            // Names only: the figures would cost MongoDB a round trip per
+            // collection, and a grant needs none of them.
+            for t in crate::commands::schema::list_table_names_inner(state.inner(), &child).await? {
                 relations.push(Relation {
                     database: db.name.clone(),
                     schema: t.schema,

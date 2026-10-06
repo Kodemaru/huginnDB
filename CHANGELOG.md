@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Expanding a MongoDB database was slow behind an SSH tunnel.** The tree
+  waited until it had every collection's document count before showing any
+  collection at all, and it asked for those counts one after another. Behind a
+  tunnel, a database with ninety-odd collections took over two seconds to
+  appear. The collections now appear straight away (about 25 ms over the same
+  tunnel), and their counts and sizes fill in a moment later, read several at a
+  time.
+- **MongoDB collections never showed their size in the tree.** The read that
+  was meant to fetch the sizes could not work against a database as a whole,
+  and its failure was silently ignored. Sizes now come from the same per-collection
+  read as the document count, at no extra cost. Sharded collections report
+  the total across their shards.
+
 ## [1.31.1] — 2026-10-05
 
 ### Fixed
