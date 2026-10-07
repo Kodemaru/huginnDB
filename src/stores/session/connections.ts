@@ -88,8 +88,16 @@ interface ConnectionsState {
    * so N of them racing means the last to resolve wins and it may well be a
    * stale one — a list of connections the user just closed, restored on the
    * next launch. `switchTo` fights the same race with `suspendSaves`.
+   *
+   * `closeTabs: true` closes the connection's own tabs as part of letting the
+   * window go — *before* the backend's graceful close, so they go at the same
+   * moment the tree does rather than seconds later. Opt-in, because a
+   * reconnect disconnects and reconnects precisely to *keep* its tabs.
    */
-  disconnect: (id: string, opts?: { persistLaunch?: boolean }) => Promise<void>;
+  disconnect: (
+    id: string,
+    opts?: { persistLaunch?: boolean; closeTabs?: boolean },
+  ) => Promise<void>;
   /**
    * Local-only side effect of a connection becoming active — no backend
    * call. Used by `connect()` itself. Not driven cross-window: a window only
@@ -247,6 +255,9 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
     // `disconnect` never fails on the backend, so the window cannot end up
     // claiming a disconnect that did not happen.
     await get().markDisconnected(id);
+    // After the flush above (which detached the save subscription), so
+    // closing them cannot persist an empty tab list over the real one.
+    if (opts?.closeTabs) useTabs.getState().closeForConnection(id);
     await api.disconnect(id);
     // Keep the persisted launch state in sync (see `connect`) — unless the
     // caller is tearing several down and will write once at the end.

@@ -38,8 +38,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     as disconnected. Behind an SSH tunnel that wait lasts a few seconds.
   - During those seconds, any schema read still in progress failed and showed
     an error, even though you had asked to disconnect.
-  - The window now updates immediately, and the connection finishes closing in
-    the background.
+  - The tree, the connection's tabs and every other window now update
+    together, immediately, and the connection finishes closing in the
+    background.
 - **A database you had expanded could quietly reopen after disconnecting.** A
   request that arrived just after the disconnect could open that database's
   connection again (with an SSH tunnel of its own), and nothing would ever

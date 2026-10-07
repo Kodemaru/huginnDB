@@ -16,6 +16,7 @@ const disconnect = vi.fn(
   () => new Promise<void>((resolve) => (releaseBackend = resolve)),
 );
 const drop = vi.fn();
+const closeForConnection = vi.fn();
 
 vi.mock("@/lib/tauri", () => ({ api: { disconnect } }));
 vi.mock("@/lib/i18n", () => ({ default: { t: (k: string) => k } }));
@@ -38,7 +39,7 @@ vi.mock("@/stores/session/schema", () => ({
   useSchema: { getState: () => ({ drop }) },
 }));
 vi.mock("@/stores/session/tabs", () => ({
-  useTabs: { getState: () => ({ tabs: [], closeForConnection: vi.fn() }) },
+  useTabs: { getState: () => ({ tabs: [], closeForConnection }) },
 }));
 vi.mock("@/lib/dockview", () => ({ clearProtectedPanelsForConnection: vi.fn() }));
 vi.mock("@/lib/connection/passwordPrompt", () => ({
@@ -64,5 +65,21 @@ describe("disconnect", () => {
 
     releaseBackend();
     await done;
+  });
+
+  it("closes the tabs with the tree when asked, before the backend has finished", async () => {
+    const done = useConnections.getState().disconnect("p", { closeTabs: true });
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledWith("p"));
+    expect(closeForConnection).toHaveBeenCalledWith("p");
+    releaseBackend();
+    await done;
+  });
+
+  it("keeps the tabs when not asked to — a reconnect disconnects to keep them", async () => {
+    const done = useConnections.getState().disconnect("p");
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledWith("p"));
+    releaseBackend();
+    await done;
+    expect(closeForConnection).not.toHaveBeenCalledWith("p");
   });
 });

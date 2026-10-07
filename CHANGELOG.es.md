@@ -42,8 +42,9 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
     segundos.
   - Durante esos segundos, cualquier lectura del esquema que siguiera en curso
     fallaba y mostraba un error, aunque hubieras pedido desconectar.
-  - Ahora la ventana se actualiza al momento, y la conexión termina de cerrarse
-    en segundo plano.
+  - Ahora el árbol, las pestañas de la conexión y el resto de ventanas se
+    actualizan a la vez y al momento, y la conexión termina de cerrarse en
+    segundo plano.
 - **Una base de datos desplegada podía volver a abrirse sola tras desconectar.**
   Una petición que llegaba justo después de desconectar podía volver a abrir la
   conexión de esa base de datos (con su propio túnel SSH), y nada la cerraba
