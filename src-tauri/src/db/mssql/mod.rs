@@ -106,6 +106,9 @@ struct Inner {
     /// [`PooledClient`], so `max_sessions` callers can work at once and the
     /// rest queue.
     permits: Arc<Semaphore>,
+    /// The permit count `permits` started with, so [`MsSqlPool::open_sessions`]
+    /// can tell how many are checked out.
+    max_sessions: usize,
     /// Sessions that are open but not in use, each stamped with the moment it
     /// was returned. Never longer than the permit count, because a permit is
     /// required to take one out.
@@ -119,6 +122,19 @@ struct Inner {
 }
 
 impl MsSqlPool {
+    /// Sessions open against the server right now: the idle ones plus the ones
+    /// checked out. For the connection footprint in Settings, so best effort —
+    /// if the idle list is locked at this instant, only the checked-out ones
+    /// are counted rather than waiting.
+    pub fn open_sessions(&self) -> u32 {
+        let checked_out = self
+            .inner
+            .max_sessions
+            .saturating_sub(self.inner.permits.available_permits());
+        let idle = self.inner.idle.try_lock().map(|v| v.len()).unwrap_or(0);
+        u32::try_from(checked_out + idle).unwrap_or(u32::MAX)
+    }
+
     /// Check out a session, opening a new one if none is idle.
     ///
     /// Waits for a permit when `MAX_SESSIONS` are already busy. The returned
@@ -824,6 +840,7 @@ pub async fn open_pool(
             cfg,
             reach,
             permits: Arc::new(Semaphore::new(max_sessions)),
+            max_sessions,
             idle: Mutex::new(Vec::new()),
         }),
     };

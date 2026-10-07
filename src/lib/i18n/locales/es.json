@@ -1757,7 +1757,9 @@
         "label": "Abiertas ahora mismo",
         "desc": "Conexiones que HuginnDB mantiene contra tus servidores. Otros clientes de esta máquina — orígenes de datos del IDE, pools de conexiones de aplicaciones, sidecars de huginndb-mcp — cuentan contra los mismos límites del servidor.",
         "value": "{{connections}} conexión(es), {{views}} vista(s) de base de datos",
-        "endpoint": "{{inUse}} de {{budget}} reservadas"
+        "endpoint": "{{open}} abiertas · {{inUse}} de {{budget}} reservadas",
+        "explain": "¿Qué significan abiertas y reservadas?",
+        "docHeading": "Conexiones reservadas y abiertas"
       },
       "maxConnections": {
         "label": "Máximo de conexiones por servidor",

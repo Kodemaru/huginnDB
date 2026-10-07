@@ -1757,7 +1757,9 @@
         "label": "Open right now",
         "desc": "Connections HuginnDB is holding against your servers. Other clients on this machine — IDE data sources, application connection pools, huginndb-mcp sidecars — count against the same server limits.",
         "value": "{{connections}} connection(s), {{views}} database view(s)",
-        "endpoint": "{{inUse}} of {{budget}} reserved"
+        "endpoint": "{{open}} open · {{inUse}} of {{budget}} reserved",
+        "explain": "What do open and reserved mean?",
+        "docHeading": "Reserved and open connections"
       },
       "maxConnections": {
         "label": "Max connections per server",

@@ -621,6 +621,23 @@ pub enum DbPool {
 }
 
 impl DbPool {
+    /// Connections this pool holds open against its server right now — the
+    /// number the server itself would count, as opposed to the *reservation*
+    /// its endpoint grant makes (a ceiling the pool may never reach). `None`
+    /// for SQLite, which has no server.
+    ///
+    /// A Mongo view shares its parent's client, so it reports the client's
+    /// whole count; callers that sum must skip views (they hold no grant).
+    pub fn open_connections(&self) -> Option<u32> {
+        match self {
+            Self::Postgres(p) => Some(p.size()),
+            Self::Mysql(p) => Some(p.size()),
+            Self::Sqlite(_) => None,
+            Self::Mongo(c) => Some(c.sockets.load(std::sync::atomic::Ordering::Relaxed)),
+            Self::MsSql(p) => Some(p.open_sessions()),
+        }
+    }
+
     /// The wire name of the driver behind this pool — see
     /// [`Driver::wire_name`], which this mirrors for the runtime side.
     pub fn driver_name(&self) -> &'static str {
@@ -645,6 +662,13 @@ impl DbPool {
 pub struct MongoConn {
     pub client: MongoClient,
     pub database: Option<String>,
+    /// Pooled connections the driver has open right now, kept by a CMAP event
+    /// handler on the client (see `db::mongo::open_pool`). The driver exposes
+    /// no pool size of its own. Shared by every view of the same client,
+    /// exactly as the client is — which is why only the parent is counted in
+    /// the footprint ([`DbPool::open_connections`]'s callers group by the
+    /// endpoint grant, which views do not hold).
+    pub sockets: Arc<std::sync::atomic::AtomicU32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,6 +1062,22 @@ impl ActiveConnections {
         orphaned
     }
 
+    /// Connections actually open per server, summed over the pools that hold a
+    /// budget grant there. Pools without one are skipped on purpose: SQLite
+    /// has no server, and a Mongo view shares its parent's client, so counting
+    /// it would count the parent's sockets twice.
+    pub fn open_by_endpoint(&self) -> HashMap<crate::db::endpoint::EndpointKey, u32> {
+        let mut open: HashMap<crate::db::endpoint::EndpointKey, u32> = HashMap::new();
+        for active in self.inner.values() {
+            let (Some(key), Some(n)) = (active.endpoint_key(), active.pool.open_connections())
+            else {
+                continue;
+            };
+            *open.entry(key.clone()).or_insert(0) += n;
+        }
+        open
+    }
+
     /// Local port of the SSH tunnel fronting the pool `id`, if it has one.
     /// What a per-database view dials to ride its parent's tunnel instead of
     /// opening its own (see `db::pool::TunnelRoute::Through`).
@@ -1416,6 +1456,49 @@ mod tests {
             holders: by.iter().map(|s| s.to_string()).collect(),
             ..ActivePool::bare(dummy_pool())
         }
+    }
+
+    /// The per-server *open* count beside the reservation. A Mongo view shares
+    /// its parent's client and so reports the parent's sockets; it holds no
+    /// grant, which is what keeps it from being counted twice.
+    #[tokio::test]
+    async fn open_connections_are_summed_per_server_without_counting_views_twice() {
+        let options = mongodb::options::ClientOptions::parse("mongodb://127.0.0.1:1")
+            .await
+            .unwrap();
+        let client = mongodb::Client::with_options(options).unwrap();
+        let sockets = Arc::new(std::sync::atomic::AtomicU32::new(3));
+        let conn = |database: Option<&str>| {
+            DbPool::Mongo(MongoConn {
+                client: client.clone(),
+                database: database.map(str::to_string),
+                sockets: sockets.clone(),
+            })
+        };
+        let profile = ConnectionProfile {
+            driver: Driver::Mongo,
+            host: "db".into(),
+            port: 27017,
+            ..crate::testkit::profile("p")
+        };
+        let key = crate::db::endpoint::EndpointKey::for_profile(&profile).unwrap();
+        let registry = Arc::new(crate::db::endpoint::EndpointRegistry::default());
+
+        let mut conns = ActiveConnections::default();
+        conns.insert(
+            "p".into(),
+            ActivePool {
+                _endpoint: Some(registry.reserve(&key, 5, 10, 2).unwrap()),
+                ..ActivePool::bare(conn(None))
+            },
+        );
+        conns.insert("p::db::a".into(), ActivePool::bare(conn(Some("a"))));
+        // A pool with no server at all contributes nothing.
+        conns.insert("lite".into(), ActivePool::bare(dummy_pool()));
+
+        let open = conns.open_by_endpoint();
+        assert_eq!(open.get(&key), Some(&3), "the parent's 3, not 3 + 3");
+        assert_eq!(open.len(), 1);
     }
 
     /// Pulse samples every minute through `peek`. If that counted as use, a

@@ -2918,6 +2918,7 @@ mod tests {
             ActivePool::bare(DbPool::Mongo(crate::state::MongoConn {
                 client,
                 database: None,
+                sockets: Default::default(),
             })),
         );
 

@@ -8,7 +8,37 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ## [Sin publicar]
 
+### Añadido
+
+- **Ajustes → Conexiones muestra cuántas conexiones hay abiertas de verdad.**
+  - Cada servidor indica ahora, por ejemplo, `2 abiertas · 7 de 10 reservadas`.
+    Antes solo aparecía el número de reservadas, y ese no es el que ve el
+    servidor.
+  - *Reservadas* es hasta dónde pueden crecer las conexiones de HuginnDB a ese
+    servidor; *abiertas* es lo que el servidor cuenta en este momento, y suele
+    ser mucho menos.
+  - Un botón **?** nuevo junto a los números abre la sección de la
+    documentación que explica ambos.
+
+### Cambiado
+
+- **Caben más conexiones al mismo servidor dentro de su límite.**
+  - Antes cada conexión reservaba 5 de los 10 de un servidor. Con dos perfiles
+    apuntando al mismo servidor, un tercero se rechazaba aunque el servidor
+    solo tuviera dos o tres conexiones abiertas.
+  - La primera conexión a un servidor sigue reservando 5. Cada una de las
+    siguientes reserva ahora la mitad de lo que quede, y nunca menos de 2. Así
+    caben tres conexiones en vez de dos.
+  - Cuando se alcanza el límite, HuginnDB cierra primero las vistas de base de
+    datos de ese servidor que no has usado últimamente, y solo rechaza la
+    conexión si con eso no basta.
+
 ### Corregido
+
+- **El límite de conexiones que mostraban los Ajustes ignoraba el límite propio
+  de una conexión.** Un servidor con su propio máximo fijado en la conexión se
+  mostraba contra el máximo global. Ahora cada servidor muestra el límite que
+  de verdad se le aplica.
 
 - **El conector MCP dejaba de funcionar al cerrar HuginnDB.** Con el puente
   (bridge) activo, el conector debe usar sus propias conexiones cuando la app
