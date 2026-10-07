@@ -88,8 +88,16 @@ interface ConnectionsState {
    * so N of them racing means the last to resolve wins and it may well be a
    * stale one — a list of connections the user just closed, restored on the
    * next launch. `switchTo` fights the same race with `suspendSaves`.
+   *
+   * `closeTabs: true` closes the connection's own tabs as part of letting the
+   * window go — *before* the backend's graceful close, so they go at the same
+   * moment the tree does rather than seconds later. Opt-in, because a
+   * reconnect disconnects and reconnects precisely to *keep* its tabs.
    */
-  disconnect: (id: string, opts?: { persistLaunch?: boolean }) => Promise<void>;
+  disconnect: (
+    id: string,
+    opts?: { persistLaunch?: boolean; closeTabs?: boolean },
+  ) => Promise<void>;
   /**
    * Local-only side effect of a connection becoming active — no backend
    * call. Used by `connect()` itself. Not driven cross-window: a window only
@@ -235,8 +243,22 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
     // backend disconnect means a save failure can't leave us with no
     // pool but a still-mounted subscription.
     await flushTabState(id);
-    await api.disconnect(id);
+    // The window first, the pool second. The backend takes the pool out of
+    // its map at once but then *waits* for it to close — gracefully, so a
+    // MongoDB client finishes what it was doing and a tunnelled server sees
+    // a clean goodbye, which over SSH is seconds. With the window updated
+    // last, the connection looked connected for all of that wait: the click
+    // felt slow, and every schema read still in flight failed against the
+    // pool that was already gone and was reported as "could not read the
+    // schema", because its slice still existed. Dropping the slice first is
+    // what lets those late failures be recognised as stale and stay quiet.
+    // `disconnect` never fails on the backend, so the window cannot end up
+    // claiming a disconnect that did not happen.
     await get().markDisconnected(id);
+    // After the flush above (which detached the save subscription), so
+    // closing them cannot persist an empty tab list over the real one.
+    if (opts?.closeTabs) useTabs.getState().closeForConnection(id);
+    await api.disconnect(id);
     // Keep the persisted launch state in sync (see `connect`) — unless the
     // caller is tearing several down and will write once at the end.
     if (opts?.persistLaunch !== false) {

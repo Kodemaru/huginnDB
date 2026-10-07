@@ -18,7 +18,6 @@ import i18n from "@/lib/i18n";
 import { notify } from "@/lib/notify";
 import { useConnections } from "@/stores/session/connections";
 import { useSchema } from "@/stores/session/schema";
-import { useTabs } from "@/stores/session/tabs";
 import { persistLaunchState } from "@/stores/session/persistedTabs";
 import { driverMismatchHint } from "@/lib/db/driver";
 
@@ -94,9 +93,11 @@ export async function disconnectAndClean(
   opts?: { persistLaunch?: boolean },
 ): Promise<void> {
   try {
-    await useConnections.getState().disconnect(id, opts);
+    // `closeTabs`: the tabs go when the tree does, not once the backend has
+    // finished closing the pool in the background — which over SSH is
+    // seconds later, and looked like the disconnect had only half happened.
+    await useConnections.getState().disconnect(id, { ...opts, closeTabs: true });
     useSchema.getState().drop(id);
-    useTabs.getState().closeForConnection(id);
   } catch {
     // Non-fatal: leave the rest of the UI untouched on a teardown error.
   }

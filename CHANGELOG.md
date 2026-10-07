@@ -33,6 +33,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **Disconnecting felt slow and could report "could not read the schema".**
+  - The window waited for the connection to finish closing before showing it
+    as disconnected. Behind an SSH tunnel that wait lasts a few seconds.
+  - During those seconds, any schema read still in progress failed and showed
+    an error, even though you had asked to disconnect.
+  - The tree, the connection's tabs and every other window now update
+    together, immediately, and the connection finishes closing in the
+    background.
+- **A database you had expanded could quietly reopen after disconnecting.** A
+  request that arrived just after the disconnect could open that database's
+  connection again (with an SSH tunnel of its own), and nothing would ever
+  close it. A database now only reopens while its connection is still open.
 - **The connection limit shown in Settings ignored a connection's own limit.**
   A server with its own maximum set on the connection was shown against the
   global one. Each server now shows the limit that actually applies to it.

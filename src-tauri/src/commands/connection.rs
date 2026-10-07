@@ -1209,13 +1209,35 @@ pub(crate) async fn close_connection(
     // parent's entry, so a single remove covers them).
     state.session_secrets.write().remove(id);
     let removed = state.connections.write().remove(id);
+    let prefix = crate::state::database_view_prefix(id);
+    let had_views = state
+        .connections
+        .read()
+        .ids()
+        .iter()
+        .any(|view| view.starts_with(&prefix));
+    let closing = removed.is_some() || had_views;
+    // Tell every window *now*, not once the graceful close below has finished.
+    // From this point the connection is gone for every purpose a window
+    // cares about — nothing new can resolve it — and over SSH the close takes
+    // seconds; emitting at the end made the other windows (and this one's
+    // tabs) let go that much later than the tree, as if the disconnect had
+    // only half happened.
+    if closing {
+        let _ = app.emit(
+            CONNECTION_CLOSED_EVENT,
+            ConnectionSyncPayload {
+                connection_id: id.to_string(),
+            },
+        );
+    }
     // Sweep synthetic children first, so the parent's tunnel (which they ride
     // on) is still up while they close.
-    let children = crate::pool_reaper::close_children(state, id).await;
+    crate::pool_reaper::close_children(state, id).await;
     if let Some(active) = &removed {
         close_pool(&active.pool, PoolOwnership::Owned, CLOSE_TIMEOUT).await;
     }
-    if removed.is_some() || !children.is_empty() {
+    if closing {
         // Driver is not tracked separately for active pools; look it up
         // on the profile (best-effort — the entry is purely informational).
         let driver = state
@@ -1226,12 +1248,6 @@ pub(crate) async fn close_connection(
             .map(|p| p.driver)
             .unwrap_or(Driver::Sqlite);
         log_connection(app, window_label, id, driver, reason, None, None);
-        let _ = app.emit(
-            CONNECTION_CLOSED_EVENT,
-            ConnectionSyncPayload {
-                connection_id: id.to_string(),
-            },
-        );
     }
 }
 
@@ -1359,6 +1375,15 @@ pub async fn ensure_database_view(
         return;
     }
     if let Some((parent_id, database)) = crate::state::split_database_view(id) {
+        // Only while the parent is open. A view the reaper closed comes back;
+        // a view whose *connection* was closed must not. A schema read still
+        // in flight when the user disconnected arrives here a moment later,
+        // and reopening would resurrect a SQL view pool — with an SSH tunnel
+        // of its own, since its parent's is gone — that no window lists and
+        // nothing would ever close.
+        if !state.connections.read().contains(parent_id) {
+            return;
+        }
         let _ = open_database_view_inner(app, state, window_label, parent_id, database).await;
     }
 }

@@ -35,6 +35,21 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ### Corregido
 
+- **Desconectar se notaba lento y podía decir que no se había podido leer el
+  esquema.**
+  - La ventana esperaba a que la conexión terminara de cerrarse antes de
+    mostrarla como desconectada. Detrás de un túnel SSH esa espera dura unos
+    segundos.
+  - Durante esos segundos, cualquier lectura del esquema que siguiera en curso
+    fallaba y mostraba un error, aunque hubieras pedido desconectar.
+  - Ahora el árbol, las pestañas de la conexión y el resto de ventanas se
+    actualizan a la vez y al momento, y la conexión termina de cerrarse en
+    segundo plano.
+- **Una base de datos desplegada podía volver a abrirse sola tras desconectar.**
+  Una petición que llegaba justo después de desconectar podía volver a abrir la
+  conexión de esa base de datos (con su propio túnel SSH), y nada la cerraba
+  nunca. Ahora una base de datos solo se reabre mientras su conexión sigue
+  abierta.
 - **El límite de conexiones que mostraban los Ajustes ignoraba el límite propio
   de una conexión.** Un servidor con su propio máximo fijado en la conexión se
   mostraba contra el máximo global. Ahora cada servidor muestra el límite que
