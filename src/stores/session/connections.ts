@@ -235,8 +235,19 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
     // backend disconnect means a save failure can't leave us with no
     // pool but a still-mounted subscription.
     await flushTabState(id);
-    await api.disconnect(id);
+    // The window first, the pool second. The backend takes the pool out of
+    // its map at once but then *waits* for it to close — gracefully, so a
+    // MongoDB client finishes what it was doing and a tunnelled server sees
+    // a clean goodbye, which over SSH is seconds. With the window updated
+    // last, the connection looked connected for all of that wait: the click
+    // felt slow, and every schema read still in flight failed against the
+    // pool that was already gone and was reported as "could not read the
+    // schema", because its slice still existed. Dropping the slice first is
+    // what lets those late failures be recognised as stale and stay quiet.
+    // `disconnect` never fails on the backend, so the window cannot end up
+    // claiming a disconnect that did not happen.
     await get().markDisconnected(id);
+    await api.disconnect(id);
     // Keep the persisted launch state in sync (see `connect`) — unless the
     // caller is tearing several down and will write once at the end.
     if (opts?.persistLaunch !== false) {

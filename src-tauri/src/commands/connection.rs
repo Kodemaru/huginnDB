@@ -1359,6 +1359,15 @@ pub async fn ensure_database_view(
         return;
     }
     if let Some((parent_id, database)) = crate::state::split_database_view(id) {
+        // Only while the parent is open. A view the reaper closed comes back;
+        // a view whose *connection* was closed must not. A schema read still
+        // in flight when the user disconnected arrives here a moment later,
+        // and reopening would resurrect a SQL view pool — with an SSH tunnel
+        // of its own, since its parent's is gone — that no window lists and
+        // nothing would ever close.
+        if !state.connections.read().contains(parent_id) {
+            return;
+        }
         let _ = open_database_view_inner(app, state, window_label, parent_id, database).await;
     }
 }
