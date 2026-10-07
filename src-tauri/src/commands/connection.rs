@@ -134,9 +134,23 @@ fn exhausted_to_error(e: EndpointExhausted) -> AppError {
 /// exhaust a server's whole allowance between them. It still cannot go below
 /// [`MIN_MAX_CONNECTIONS`], because two sidecars can share one pool and a
 /// single slot deadlocks a batch against a concurrent read.
-fn top_level_request_for(origin: PoolOrigin, policy: &PoolPolicy) -> u32 {
+///
+/// `in_use` is what the server's budget already has reserved, and it is what
+/// makes a person's share adaptive. The first connection to a server takes
+/// the full [`top_level_request`]. Every later one takes **half of what is
+/// left**, never below [`MIN_MAX_CONNECTIONS`]. Before this, every connection
+/// asked for five, so two profiles on one server spent a budget of ten between
+/// them and the third was refused by our own accounting — while the server
+/// itself saw two or three sockets. Pool sizes cannot change once a pool is
+/// open (in sqlx or in the MongoDB driver), so the split has to be decided
+/// here, at connect time; halving what is left keeps room for whoever comes
+/// next. Under the default budget that is 5, 2, 2: three connections where
+/// there used to be two.
+fn top_level_request_for(origin: PoolOrigin, policy: &PoolPolicy, in_use: u32) -> u32 {
     match origin {
-        PoolOrigin::User => top_level_request(policy.budget, policy.child_request),
+        PoolOrigin::User if in_use == 0 => top_level_request(policy.budget, policy.child_request),
+        PoolOrigin::User => (policy.budget.saturating_sub(in_use) / 2)
+            .clamp(MIN_MAX_CONNECTIONS, crate::db::pool::TOP_LEVEL_REQUEST),
         PoolOrigin::Bridge => policy
             .child_request
             .max(MIN_MAX_CONNECTIONS)
@@ -148,8 +162,16 @@ fn top_level_request_for(origin: PoolOrigin, policy: &PoolPolicy) -> u32 {
 ///
 /// `Ok(None)` means the profile has no server to ration (SQLite) — not that the
 /// reservation failed.
-fn reserve_top_level(
+///
+/// When the budget is spent, our own idle per-database views on the same
+/// server are closed, least recently used first, before giving up — the same
+/// reclaim `open_database_view` already did for views. A view reopens by
+/// itself the next time its database is touched, so it is a far cheaper thing
+/// to lose than the connection the user just asked for.
+async fn reserve_top_level(
+    app: &AppHandle,
     state: &AppState,
+    window_label: Option<&str>,
     profile: &ConnectionProfile,
     policy: &PoolPolicy,
     origin: PoolOrigin,
@@ -157,16 +179,23 @@ fn reserve_top_level(
     let Some(key) = EndpointKey::for_profile(profile) else {
         return Ok(None);
     };
-    state
-        .endpoints
-        .reserve(
-            &key,
-            top_level_request_for(origin, policy),
-            policy.budget,
-            MIN_MAX_CONNECTIONS,
-        )
-        .map(Some)
-        .map_err(exhausted_to_error)
+    let mut reclaimable = state.connections.read().views_on_endpoint_by_lru(&key);
+    loop {
+        let requested = top_level_request_for(origin, policy, state.endpoints.in_use(&key));
+        match state
+            .endpoints
+            .reserve(&key, requested, policy.budget, MIN_MAX_CONNECTIONS)
+        {
+            Ok(grant) => return Ok(Some(grant)),
+            Err(exhausted) => {
+                if reclaimable.is_empty() {
+                    return Err(exhausted_to_error(exhausted));
+                }
+                let victim = reclaimable.remove(0);
+                close_view(app, state, window_label, profile.driver, &victim, "budget").await;
+            }
+        }
+    }
 }
 
 /// Pool sizing implied by a grant. SQLite (`None`) is fixed at one connection
@@ -1015,7 +1044,7 @@ pub(crate) async fn connect_inner(
     // Reserve the server's capacity *before* dialling. Failing here costs
     // nothing and reports a limit the user controls; failing at the server
     // costs a round trip and reports one they may not.
-    let grant = reserve_top_level(state, &profile, &policy, origin)?;
+    let grant = reserve_top_level(app, state, window_label, &profile, &policy, origin).await?;
     let limits = limits_for(&grant);
     let start = Instant::now();
     log_connection(
@@ -1358,6 +1387,7 @@ pub async fn resolve_mongo_database_view(
     let child_pool = crate::state::DbPool::Mongo(crate::state::MongoConn {
         client: conn.client.clone(),
         database: Some(database.to_string()),
+        sockets: conn.sockets.clone(),
     });
     state
         .connections
@@ -1630,8 +1660,19 @@ pub struct PoolStats {
 pub struct EndpointUsage {
     /// `host:port`, plus the SSH tunnel when there is one.
     pub label: String,
-    /// Connections reserved against it right now.
+    /// Connections' worth of pool capacity **reserved** against it: the sum of
+    /// the ceilings its pools may grow to. What the budget is enforced on.
     pub in_use: u32,
+    /// The budget in force for this server — the profile's own override when
+    /// it has one. The panel used to divide by the global preference, which
+    /// was wrong for every server with an override.
+    pub budget: u32,
+    /// Connections actually **open** against it right now, as the server
+    /// would count them. Usually far below `in_use`: a pool opens sockets on
+    /// demand and closes idle ones, so a reservation of five is often one real
+    /// connection. "5 of 10 reserved" with no real number beside it is what
+    /// people found impossible to read.
+    pub open: u32,
 }
 
 /// Snapshot of the current pool footprint. See [`PoolStats`].
@@ -1643,12 +1684,20 @@ pub fn connection_pool_stats(state: State<'_, AppState>) -> AppResult<PoolStats>
         connections,
         database_views,
         mcp_connections,
-        endpoints: state
-            .endpoints
-            .usage()
-            .into_iter()
-            .map(|(label, in_use)| EndpointUsage { label, in_use })
-            .collect(),
+        endpoints: {
+            let open = state.connections.read().open_by_endpoint();
+            state
+                .endpoints
+                .usage()
+                .into_iter()
+                .map(|row| EndpointUsage {
+                    open: open.get(&row.key).copied().unwrap_or(0),
+                    label: row.label,
+                    in_use: row.in_use,
+                    budget: row.budget,
+                })
+                .collect()
+        },
         mcp_bridge_port: state.mcp_bridge.lock().as_ref().map(|h| h.port),
     })
 }
@@ -2379,10 +2428,45 @@ mod tests {
             ping_timeout: crate::db::pool::DEFAULT_OPERATION_TIMEOUT,
         };
         assert_eq!(
-            top_level_request_for(PoolOrigin::User, &policy),
+            top_level_request_for(PoolOrigin::User, &policy, 0),
             crate::db::pool::TOP_LEVEL_REQUEST
         );
-        assert_eq!(top_level_request_for(PoolOrigin::Bridge, &policy), 2);
+        assert_eq!(top_level_request_for(PoolOrigin::Bridge, &policy, 0), 2);
+    }
+
+    /// Three profiles on one server under the default budget of ten. Each used
+    /// to ask for five, so the third was refused by our own accounting while
+    /// the server saw two or three sockets. The share is now adaptive: the
+    /// first takes five, later ones half of what is left, floor two.
+    #[test]
+    fn later_connections_to_one_server_take_half_of_what_is_left() {
+        let policy = PoolPolicy {
+            budget: crate::db::pool::DEFAULT_ENDPOINT_BUDGET,
+            child_request: crate::db::pool::DEFAULT_CHILD_MAX_CONNECTIONS,
+            keepalive: Duration::from_secs(180),
+            ping_timeout: crate::db::pool::DEFAULT_OPERATION_TIMEOUT,
+        };
+        let registry = std::sync::Arc::new(crate::db::endpoint::EndpointRegistry::default());
+        let key = EndpointKey::for_profile(&crate::testkit::profile("p")).unwrap();
+        let mut grants = Vec::new();
+        let mut amounts = Vec::new();
+        loop {
+            let requested = top_level_request_for(PoolOrigin::User, &policy, registry.in_use(&key));
+            match registry.reserve(&key, requested, policy.budget, MIN_MAX_CONNECTIONS) {
+                Ok(g) => {
+                    amounts.push(g.amount());
+                    grants.push(g);
+                }
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            amounts,
+            vec![5, 2, 2],
+            "three connections to one server instead of two"
+        );
+        // The connector's share is unchanged by any of this.
+        assert_eq!(top_level_request_for(PoolOrigin::Bridge, &policy, 9), 2);
     }
 
     #[test]
@@ -2397,7 +2481,7 @@ mod tests {
             ping_timeout: crate::db::pool::DEFAULT_OPERATION_TIMEOUT,
         };
         assert_eq!(
-            top_level_request_for(PoolOrigin::Bridge, &policy),
+            top_level_request_for(PoolOrigin::Bridge, &policy, 0),
             MIN_MAX_CONNECTIONS
         );
         // ...but never more than the server's whole allowance.
@@ -2405,7 +2489,7 @@ mod tests {
             budget: 1,
             ..policy
         };
-        assert_eq!(top_level_request_for(PoolOrigin::Bridge, &tight), 1);
+        assert_eq!(top_level_request_for(PoolOrigin::Bridge, &tight, 0), 1);
     }
 
     /// The first connect of a session against a server that turns out to be
@@ -2602,6 +2686,7 @@ mod tests {
             ActivePool::bare(crate::state::DbPool::Mongo(MongoConn {
                 client: client.clone(),
                 database: None,
+                sockets: Default::default(),
             })),
         );
 

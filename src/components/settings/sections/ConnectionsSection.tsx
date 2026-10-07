@@ -15,8 +15,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Info } from "lucide-react";
 import { notify } from "@/lib/notify";
+import { docLocation } from "@/lib/appInfo/docs";
+import { useDocsDialog } from "@/stores/dialogs/docsDialog";
+import { useSettingsDialog } from "@/components/settings/useSettingsDialog";
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -34,7 +39,7 @@ const STATS_POLL_MS = 3000;
 export function ConnectionsSection() {
   const connections = usePreferences(selectConnectionPrefs);
   const updateConnections = usePreferences((s) => s.updateConnections);
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [releasing, setReleasing] = useState(false);
@@ -65,6 +70,20 @@ export function ConnectionsSection() {
     } finally {
       setReleasing(false);
     }
+  }
+
+  /** Open the documentation on the section that explains these numbers, in
+   *  the language the viewer will show — see `docLocation`. */
+  function explain() {
+    const where = docLocation(
+      "connections",
+      t("settings.connections.live.docHeading"),
+      i18n.language,
+    );
+    useSettingsDialog.getState().setOpen(false);
+    useDocsDialog
+      .getState()
+      .openTo("connections", where?.section ?? null, where?.anchor ?? null);
   }
 
   /** Commit a numeric field, ignoring the intermediate garbage a
@@ -106,6 +125,11 @@ export function ConnectionsSection() {
             {/* Per-server rows. The two counts above are per *pool*, and one
                 server can back several of them — this is the breakdown that
                 matches what the server's own `max_connections` is counting. */}
+            {/* Two numbers per server, because they answer different
+                questions: *open* is what the server counts, *reserved* is the
+                ceiling HuginnDB's budget is enforced on. The reserved count on
+                its own ("5 of 10") read as five connections the server could
+                see, which is what people kept asking about. */}
             {stats && stats.endpoints.length > 0 && (
               <ul className="space-y-0.5 text-right">
                 {stats.endpoints.map((e) => (
@@ -116,13 +140,22 @@ export function ConnectionsSection() {
                     {e.label}
                     {" · "}
                     {t("settings.connections.live.endpoint", {
+                      open: e.open,
                       inUse: e.inUse,
-                      budget: connections.maxConnections,
+                      // The server's own budget, a profile override included —
+                      // not the global preference, which was wrong for every
+                      // server that has one.
+                      budget: e.budget,
                     })}
                   </li>
                 ))}
               </ul>
             )}
+            <IconButton
+              icon={Info}
+              label={t("settings.connections.live.explain")}
+              onClick={explain}
+            />
           </div>
         </PrefRow>
       </PrefGroup>

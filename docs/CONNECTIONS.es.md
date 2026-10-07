@@ -114,8 +114,48 @@ servidor*, aunque HuginnDB no los vea:
 
 Los límites se aplican al *abrir* un pool; los ya abiertos conservan lo que se
 les concedió, así que reconecta para aplicar un cambio al momento. Y cuando se
-agota el presupuesto de un servidor, abrir otra vista de base de datos cierra la
-que hace más tiempo que no usas en lugar de fallar.
+agota el presupuesto de un servidor, abrir otra conexión o vista de base de datos
+cierra primero la vista de ese servidor que hace más tiempo que no usas, en
+lugar de fallar.
+
+### Conexiones reservadas y abiertas
+
+Cada servidor de **Ajustes → Conexiones** muestra dos números, por ejemplo
+`2 abiertas · 7 de 10 reservadas`. Miden cosas distintas:
+
+- **Abiertas** es lo que cuenta el propio servidor: las conexiones que HuginnDB
+  tiene contra él ahora mismo. Los pools abren conexiones cuando una consulta
+  necesita una y las cierran tras cinco minutos sin uso, así que este número se
+  mueve con lo que estés haciendo.
+- **Reservadas** es lo máximo que esas conexiones *pueden* llegar a crecer. Cada
+  pool reclama un techo del presupuesto del servidor al abrirse, y ese
+  presupuesto (el segundo número) es lo que impide que HuginnDB supere nunca el
+  límite que fijaste, por muchas conexiones y vistas de base de datos que
+  lleguen a ese servidor.
+
+Así que `7 de 10 reservadas` con `2 abiertas` es normal: HuginnDB se ha
+prometido hasta siete conexiones contra ese servidor y está usando dos.
+
+Cómo se reparte el presupuesto:
+
+- La **primera** conexión a un servidor reserva 5, lo que deja sitio a sus
+  vistas de base de datos.
+- Cada conexión **adicional** al mismo servidor — otro perfil que apunta al
+  mismo host y puerto — reserva la mitad de lo que quede, nunca menos de 2. Con
+  el presupuesto por defecto de 10 eso da 5, 2 y 2: tres conexiones a un
+  servidor en vez de dos.
+- Una **vista de base de datos** (una base de datos que has desplegado en una
+  conexión de servidor completo) reserva 2 propias en los servidores SQL. Las
+  vistas de MongoDB comparten el cliente de su conexión y no reservan nada.
+- Una conexión abierta para el **conector MCP** reserva 2.
+
+El techo de un pool queda fijo al abrirse, por eso el reparto se decide al
+conectar. Si se agota el presupuesto de un servidor, sube **Máximo de conexiones
+por servidor** (o el límite propio del perfil) y reconecta.
+
+El driver de MongoDB mantiene además una o dos conexiones de monitorización por
+servidor fuera de su pool. Esas no se cuentan, así que el servidor puede ver un
+par más de las que muestra **abiertas**.
 
 Un solo servidor puede llevar además su propio techo: **Máximo de conexiones para
 este servidor**, en el diálogo de conexión, pisa la preferencia global solo para
@@ -149,16 +189,29 @@ por defecto — ver [`MCP.es.md`](MCP.es.md).
 ## Keepalive y conexiones perdidas
 
 Una conexión inactiva la puede cortar sin avisar un NAT, un balanceador o un
-cortafuegos corporativo: el pool sobrevive en memoria y la *siguiente* consulta
-falla con un error opaco del driver. Un latido hace ping periódicamente a cada
-conexión de primer nivel (**Ajustes → Conexiones → Intervalo de keepalive**; `0`
-lo desactiva), lo que mantiene el socket — y el canal SSH de un túnel — en uso, y
-sirve además como detector de las caídas que no puede evitar. Un ping fallido
-marca la conexión, y tanto la lista de conexiones como la barra de estado ofrecen
-**Reconectar** en un clic en vez de dejar que te enteres a mitad de una consulta.
+cortafuegos corporativo. HuginnDB se defiende de eso por capas:
 
-Las vistas por base de datos no se pinguean aparte: dependen de la misma
-liveness de TCP o del túnel que su padre y son baratas de reabrir.
+- **Un latido** hace ping periódicamente a cada conexión de primer nivel
+  (**Ajustes → Conexiones → Intervalo de keepalive**; `0` lo desactiva). Eso
+  mantiene la conexión en uso y detecta las caídas que no puede evitar.
+- **Cada conexión se comprueba antes de que una consulta la use.** La que no
+  responde en cinco segundos se descarta y se sustituye por una nueva, así que
+  una consulta tras una pausa larga recibe una conexión que funciona en vez de
+  un error.
+- **Los túneles SSH se mantienen vivos solos**, con su propio keepalive cada 30
+  segundos. Si aun así la sesión de un túnel se cae, se reconecta sola la
+  siguiente vez que se usa, volviendo a verificar la clave del servidor.
+
+Cuando un ping falla, se reintenta dos veces antes de dar la conexión por
+perdida, así que una VPN que se reconecta o un portátil que sale de suspensión
+no lanzan una alerta. Una conexión perdida se marca en la lista de conexiones y
+en la barra de estado, con **Reconectar** en un clic. Además se sigue
+comprobando cada 30 segundos y, cuando vuelve a responder — normalmente sola,
+porque las conexiones muertas se sustituyen y los túneles se reconectan —, el
+aviso desaparece y se te informa de que la conexión ha vuelto.
+
+Las vistas por base de datos no se pinguean aparte. Usan la misma conexión — y
+el mismo túnel SSH — que su padre, y se reabren solas.
 
 ## Abrir una conexión desde la línea de comandos
 

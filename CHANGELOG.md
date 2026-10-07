@@ -6,8 +6,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- **Settings → Connections shows how many connections are actually open.**
+  - Each server now reads, for example, `2 open · 7 of 10 reserved`. Before, it
+    showed only the reserved number, and that number is not what the server
+    sees.
+  - *Reserved* is how far HuginnDB's connections to that server are allowed to
+    grow; *open* is what the server counts right now, and is usually much
+    lower.
+  - A new **?** button beside the counts opens the documentation section that
+    explains both.
+
+### Changed
+
+- **More connections to the same server fit within its limit.**
+  - Every connection used to reserve 5 of a server's 10. With two profiles
+    pointing at the same server, a third was refused even though the server had
+    only two or three connections open.
+  - The first connection to a server still reserves 5. Each further one now
+    reserves half of what is left, and never fewer than 2. That makes room for
+    three connections instead of two.
+  - When the limit is reached, HuginnDB first closes database views you
+    haven't used recently on that server, and only refuses if that isn't
+    enough.
+
 ### Fixed
 
+- **The connection limit shown in Settings ignored a connection's own limit.**
+  A server with its own maximum set on the connection was shown against the
+  global one. Each server now shows the limit that actually applies to it.
 - **The MCP connector stopped working when HuginnDB was closed.** With the
   bridge on, the connector is meant to fall back to its own connections when
   the app isn't there to lend it one. It didn't: every tool call failed until

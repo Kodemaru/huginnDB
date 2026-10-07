@@ -35,8 +35,12 @@ use crate::db::ssh::{self, SshTunnelHandle};
 use crate::error::{AppError, AppResult};
 use crate::ssh_known_hosts::SharedKnownHosts;
 use crate::state::{ConnectionProfile, DbPool, MongoConn};
+use mongodb::event::cmap::CmapEvent;
+use mongodb::event::EventHandler;
 use mongodb::options::{ClientOptions, Credential, ServerAddress};
 use mongodb::Client;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// URL-encode a component for use inside a `mongodb://` URI.
@@ -123,6 +127,26 @@ pub async fn open_pool(
     options.min_pool_size = Some(0);
     options.max_idle_time = Some(crate::db::pool::IDLE_TIMEOUT);
 
+    // Count the pooled connections ourselves: the driver has no public pool
+    // size, and the Settings footprint needs the real number next to the
+    // reservation. CMAP events cover pooled connections only — the driver's
+    // own server monitors are on top, one or two per host, and not counted.
+    let sockets = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&sockets);
+    options.cmap_event_handler = Some(EventHandler::callback(move |event| match event {
+        CmapEvent::ConnectionCreated(_) => {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        CmapEvent::ConnectionClosed(_) => {
+            // Saturating: a close for a connection created before the handler
+            // existed cannot happen today, but must never wrap to four billion.
+            let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(1))
+            });
+        }
+        _ => {}
+    }));
+
     // Inject a keychain-sourced password when the URI carried none (URI-primary
     // mode where the secret is stored separately rather than embedded). The
     // credential builder is type-state, so we take any existing credential (or
@@ -201,7 +225,11 @@ pub async fn open_pool(
     });
 
     let client = Client::with_options(options)?;
-    let conn = MongoConn { client, database };
+    let conn = MongoConn {
+        client,
+        database,
+        sockets,
+    };
     // Fail fast on an unreachable host or bad credentials, instead of surfacing
     // the failure on the first schema read. `Client::with_options` is *lazy* —
     // it parses, validates and spawns the driver's monitor tasks without ever

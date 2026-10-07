@@ -108,8 +108,46 @@ though HuginnDB can't see them:
 
 Limits apply when a pool is *opened*; pools already open keep what they were
 granted, so reconnect to apply a change immediately. And when a server's
-allowance is spent, opening another database view closes the one you used least
-recently rather than failing.
+allowance is spent, opening another connection or database view first closes
+the database view you used least recently on that server, rather than failing.
+
+### Reserved and open connections
+
+Each server in **Settings → Connections** shows two numbers, for example
+`2 open · 7 of 10 reserved`. They measure different things:
+
+- **Open** is what the server itself counts: the connections HuginnDB actually
+  holds against it right now. Pools open connections when a query needs one
+  and close them after five idle minutes, so this number moves with what you
+  are doing.
+- **Reserved** is the most those connections are *allowed* to grow to. Every
+  pool claims a ceiling from the server's allowance when it opens, and the
+  allowance (the second number) is what keeps HuginnDB from ever exceeding the
+  limit you set, however many connections and database views reach that server.
+
+So `7 of 10 reserved` with `2 open` is normal: HuginnDB has promised itself up
+to seven connections against that server, and is using two.
+
+How the allowance is shared:
+
+- The **first** connection to a server reserves 5, which leaves room for its
+  database views.
+- Each **further** connection to the same server — another profile pointing at
+  the same host and port — reserves half of what is left, never fewer than 2.
+  Under the default allowance of 10 that is 5, 2 and 2: three connections to
+  one server instead of two.
+- A **database view** (a database you expanded on a server-wide connection)
+  reserves 2 of its own on SQL servers. MongoDB views share their connection's
+  client and reserve nothing.
+- A connection opened for the **MCP connector** reserves 2.
+
+A pool's ceiling is fixed once it opens, which is why the split is decided at
+connect time. If a server's allowance is spent, raise **Max connections per
+server** (or the profile's own limit) and reconnect.
+
+The MongoDB driver also keeps one or two monitoring connections per server
+outside its pool. Those are not counted, so the server may see a couple more
+than **open** shows.
 
 A single server can also carry its own ceiling: **Max connections for this
 server** in the connection dialog overrides the global preference for that
@@ -142,16 +180,28 @@ server. It opens a token-protected listener on localhost and is off by default
 ## Keepalive and lost connections
 
 An idle connection can be dropped silently by a NAT gateway, a load balancer
-or a corporate firewall: the pool survives in memory and the *next* query
-fails with an opaque driver error. A heartbeat pings each top-level connection
-periodically (**Settings → Connections → Keepalive interval**; `0` disables
-it), which keeps the socket — and a tunnel's SSH channel — exercised, and
-doubles as the detector for the drops it can't prevent. A failed ping flags
-the connection, and both the connection list and the status bar offer a
-one-click **Reconnect** instead of letting you find out mid-query.
+or a corporate firewall. HuginnDB defends against that in layers:
 
-Per-database views are not pinged separately: they ride the same TCP or tunnel
-liveness as their parent and are cheap to reopen.
+- **A heartbeat** pings each top-level connection periodically
+  (**Settings → Connections → Keepalive interval**; `0` disables it). That
+  keeps the connection exercised and detects the drops it can't prevent.
+- **Every connection is checked before a query uses it.** One that doesn't
+  answer within five seconds is thrown away and replaced by a fresh one, so a
+  query after a long pause gets a working connection instead of an error.
+- **SSH tunnels keep themselves alive** with their own keepalive every 30
+  seconds. If a tunnel's session dies anyway, it reconnects by itself the next
+  time it is used, verifying the server's host key again.
+
+When a ping does fail, it is retried twice before the connection is reported
+lost, so a VPN reconnecting or a laptop waking up doesn't raise an alert. A
+connection reported lost is marked in the connection list and the status bar,
+with a one-click **Reconnect**. It is also still checked every 30 seconds, and
+when it answers again — usually on its own, since dead connections are
+replaced and tunnels reconnect — the warning goes away and you are told the
+connection is back.
+
+Per-database views are not pinged separately. They ride the same connection
+— and the same SSH tunnel — as their parent, and reopen by themselves.
 
 ## Opening a connection from the command line
 

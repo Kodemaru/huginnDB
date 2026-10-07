@@ -160,11 +160,32 @@ pub struct EndpointExhausted {
     pub in_use: u32,
 }
 
+/// One endpoint's ledger: what is reserved against it, out of what.
+#[derive(Debug, Clone, Copy, Default)]
+struct Ledger {
+    in_use: u32,
+    /// The budget the most recent reservation was made under. Profiles on one
+    /// server can carry different overrides, so this is "the limit in force
+    /// last time anyone asked" — the number the usage panel has to show next
+    /// to `in_use`, rather than the global preference it used to assume.
+    budget: u32,
+}
+
+/// One row of [`EndpointRegistry::usage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointUsageRow {
+    pub key: EndpointKey,
+    pub label: String,
+    /// Connections' worth of pool capacity reserved — ceilings, not sockets.
+    pub in_use: u32,
+    pub budget: u32,
+}
+
 /// Reserved capacity per endpoint. One instance lives in
 /// [`crate::state::AppState`].
 #[derive(Default)]
 pub struct EndpointRegistry {
-    inner: Mutex<HashMap<EndpointKey, u32>>,
+    inner: Mutex<HashMap<EndpointKey, Ledger>>,
 }
 
 impl EndpointRegistry {
@@ -186,7 +207,7 @@ impl EndpointRegistry {
         floor: u32,
     ) -> Result<EndpointGrant, EndpointExhausted> {
         let mut inner = self.inner.lock();
-        let in_use = inner.get(key).copied().unwrap_or(0);
+        let in_use = inner.get(key).map(|l| l.in_use).unwrap_or(0);
         let available = budget.saturating_sub(in_use);
         // `min(requested, available)`, but never below the floor — and never
         // above the budget itself, so a single pool asking for more than the
@@ -199,7 +220,9 @@ impl EndpointRegistry {
                 in_use,
             });
         }
-        *inner.entry(key.clone()).or_insert(0) += amount;
+        let ledger = inner.entry(key.clone()).or_default();
+        ledger.in_use += amount;
+        ledger.budget = budget;
         Ok(EndpointGrant {
             registry: Arc::clone(self),
             key: key.clone(),
@@ -211,8 +234,8 @@ impl EndpointRegistry {
     fn release(&self, key: &EndpointKey, amount: u32) {
         let mut inner = self.inner.lock();
         if let Some(current) = inner.get_mut(key) {
-            *current = current.saturating_sub(amount);
-            if *current == 0 {
+            current.in_use = current.in_use.saturating_sub(amount);
+            if current.in_use == 0 {
                 // Drop the entry so the map tracks live endpoints only — it is
                 // read whole by the usage panel.
                 inner.remove(key);
@@ -220,25 +243,27 @@ impl EndpointRegistry {
         }
     }
 
-    /// Connections currently reserved against `key`.
-    ///
-    /// Test-only: production readers want [`Self::usage`], which reports every
-    /// endpoint at once for the pool-usage panel rather than probing one.
-    #[cfg(test)]
+    /// Connections currently reserved against `key`. What the adaptive
+    /// top-level share is computed from (`commands::connection`).
     pub fn in_use(&self, key: &EndpointKey) -> u32 {
-        self.inner.lock().get(key).copied().unwrap_or(0)
+        self.inner.lock().get(key).map(|l| l.in_use).unwrap_or(0)
     }
 
-    /// Every endpoint with a live reservation, as `(label, in_use)`, sorted by
-    /// label so the usage panel doesn't reshuffle on every poll.
-    pub fn usage(&self) -> Vec<(String, u32)> {
-        let mut rows: Vec<(String, u32)> = self
+    /// Every endpoint with a live reservation, sorted by label so the usage
+    /// panel doesn't reshuffle on every poll.
+    pub fn usage(&self) -> Vec<EndpointUsageRow> {
+        let mut rows: Vec<EndpointUsageRow> = self
             .inner
             .lock()
             .iter()
-            .map(|(key, amount)| (key.label(), *amount))
+            .map(|(key, ledger)| EndpointUsageRow {
+                key: key.clone(),
+                label: key.label(),
+                in_use: ledger.in_use,
+                budget: ledger.budget,
+            })
             .collect();
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows.sort_by(|a, b| a.label.cmp(&b.label));
         rows
     }
 }
@@ -382,7 +407,12 @@ mod tests {
         let registry = Arc::new(EndpointRegistry::default());
         let k = key();
         let grant = registry.reserve(&k, 4, 10, 2).unwrap();
-        assert_eq!(registry.usage(), vec![("db:5432".to_string(), 4)]);
+        let usage = registry.usage();
+        assert_eq!(usage.len(), 1);
+        assert_eq!(
+            (usage[0].label.as_str(), usage[0].in_use, usage[0].budget),
+            ("db:5432", 4, 10)
+        );
         drop(grant);
         assert!(registry.usage().is_empty());
     }

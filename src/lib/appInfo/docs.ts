@@ -18,6 +18,7 @@
  */
 
 import type { AppLanguage } from "@/types";
+import { locate, parseDoc, slugify } from "./docOutline";
 import connectionsRaw from "../../../docs/CONNECTIONS.md?raw";
 import connectionsEsRaw from "../../../docs/CONNECTIONS.es.md?raw";
 import environmentsRaw from "../../../docs/ENVIRONMENTS.md?raw";
@@ -168,4 +169,25 @@ export function getDoc(id: string): DocEntry | undefined {
 /** Markdown body for the given UI language, falling back to English. */
 export function getDocBody(doc: DocEntry, lang: string): string {
   return doc.bodies[lang as AppLanguage] ?? doc.bodies.en;
+}
+
+/**
+ * Where a heading lives in a doc, in the given language — what
+ * `useDocsDialog.openTo` needs to land on it.
+ *
+ * By heading **text** rather than slug because slugs are per language: the
+ * same section is `connection-limits` in English and `límites-de-conexiones` in
+ * Spanish. A link from the UI carries the heading through i18n and resolves
+ * it here against the body the viewer will actually show. `null` when the
+ * heading is not there (renamed), which the caller treats as "open the doc's
+ * cover" rather than navigating somewhere arbitrary.
+ */
+export function docLocation(
+  id: string,
+  heading: string,
+  lang: string,
+): { section: string | null; anchor: string | null } | null {
+  const doc = getDoc(id);
+  if (!doc) return null;
+  return locate(parseDoc(getDocBody(doc, lang)), slugify(heading));
 }

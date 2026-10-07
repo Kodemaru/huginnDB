@@ -1492,8 +1492,15 @@ export interface PoolStats {
 export interface EndpointUsage {
   /** `host:port`, plus the SSH tunnel when there is one. */
   label: string;
-  /** Connections reserved against it right now. */
+  /**
+   * Connections' worth of pool capacity **reserved** against it — the sum of
+   * the ceilings its pools may grow to, which is what the budget limits.
+   */
   inUse: number;
+  /** The budget in force for this server (a profile override included). */
+  budget: number;
+  /** Connections actually **open** against it right now. */
+  open: number;
 }
 
 export interface EditorPrefs {
