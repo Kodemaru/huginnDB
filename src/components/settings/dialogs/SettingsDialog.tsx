@@ -36,6 +36,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Activity,
+  BookOpen,
   Bell,
   Bot,
   Cable,
@@ -70,6 +71,11 @@ import {
   useUpdateStore,
 } from "@/stores/update";
 import { useConnections } from "@/stores/session/connections";
+import { useDocsDialog } from "@/stores/dialogs/docsDialog";
+import {
+  docForSettingsSection,
+  resolveSettingsDoc,
+} from "@/lib/appInfo/settingsDocs";
 import { DEFAULT_PREFS, usePreferences } from "@/stores/preferences/preferences";
 import { GeneralSection } from "@/components/settings/sections/GeneralSection";
 import { EditorSection } from "@/components/settings/sections/EditorSection";
@@ -198,7 +204,7 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
   const [confirmReset, setConfirmReset] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchFocusRequest = useSettingsDialog((s) => s.searchFocusRequest);
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   // Keep the controlled prop (from App.tsx's existing button) in sync with
   // the central store so either entry point opens / closes the same UI.
@@ -264,6 +270,22 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
   };
 
   const sectionModified = modifiedBySection[section] ?? [];
+
+  // The guide that explains this section, if one does (`settingsDocs`). Every
+  // section with a guide gets the same button in the same place, which is what
+  // the hand-written "full guide" links at the foot of MCP and Pulse were an
+  // inconsistent half of.
+  const guide = searching ? undefined : docForSettingsSection(section);
+  const openGuide = () => {
+    if (!guide) return;
+    const target = resolveSettingsDoc(
+      guide,
+      guide.headingKey ? t(guide.headingKey) : null,
+      i18n.language,
+    );
+    handleOpenChange(false);
+    useDocsDialog.getState().openTo(target.id, target.section, target.anchor);
+  };
 
   const trailingFor = (id: SettingsSection) => {
     const parts: React.ReactNode[] = [];
@@ -404,19 +426,35 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
                     : t(`settings.sections.${section}.desc`)}
                 </p>
               </div>
-              {!searching && sectionModified.length > 0 && (
+              {!searching && (sectionModified.length > 0 || guide) && (
                 <div className="flex shrink-0 items-center gap-2 pt-0.5">
-                  <Badge tone="brand">
-                    {t("settings.changedCount", { count: sectionModified.length })}
-                  </Badge>
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    icon={RotateCcw}
-                    onClick={() => setConfirmReset(true)}
-                  >
-                    {t("settings.resetSection")}
-                  </Button>
+                  {sectionModified.length > 0 && (
+                    <>
+                      <Badge tone="brand">
+                        {t("settings.changedCount", {
+                          count: sectionModified.length,
+                        })}
+                      </Badge>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        icon={RotateCcw}
+                        onClick={() => setConfirmReset(true)}
+                      >
+                        {t("settings.resetSection")}
+                      </Button>
+                    </>
+                  )}
+                  {guide && (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      icon={BookOpen}
+                      onClick={openGuide}
+                    >
+                      {t("docs.readGuide")}
+                    </Button>
+                  )}
                 </div>
               )}
             </div>

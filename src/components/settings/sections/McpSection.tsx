@@ -31,8 +31,6 @@ import {
 } from "@/lib/connection/origin";
 import { buildRailSections } from "@/lib/connection/railSections";
 import { useOrigins } from "@/stores/sync/origins";
-import { useDocsDialog } from "@/stores/dialogs/docsDialog";
-import { useSettingsDialog } from "@/components/settings/useSettingsDialog";
 import type {
   ClaudeCodeRegistration,
   ConnectionProfile,
@@ -482,19 +480,6 @@ export function McpSection() {
           {jsonSnippet || t("settings.mcp.noBinaryHint")}
         </pre>
       </PrefGroup>
-
-      <Button
-        type="button"
-        variant="link"
-        size="sm"
-        className="h-auto p-0 text-xs"
-        onClick={() => {
-          useSettingsDialog.getState().setOpen(false);
-          useDocsDialog.getState().openTo("mcp");
-        }}
-      >
-        {t("settings.mcp.fullGuide")}
-      </Button>
 
       {pendingFull && (
         <ConfirmDialog

@@ -1,33 +1,68 @@
 /**
- * Documentation viewer — Help → Documentation. Two panes: a navigation tree on
- * the left, one page of the selected doc on the right.
+ * Documentation viewer — Help → Documentation.
  *
- * A doc opens on its **cover** (the prose before its first `##`, plus a card per
- * section); picking a section shows that section alone. Paging rather than one
- * long scroll because `docs/MCP.md` is 400+ lines in a 70vh pane, and finding
- * what a tool requires meant scrolling blind past five client configurations.
+ * A workbench dialog built on the same anatomy as Preferences (gotcha #82), so
+ * the two read as one family: a header, a left rail with its own search box and
+ * grouped entries, and a pane with a page header above a scrolling body.
  *
- * The tree is derived from the markdown itself (`lib/appInfo/docOutline`), not
+ * - **Home.** The viewer opens on a grid of every guide with what it is for,
+ *   rather than inside whichever guide happened to be first.
+ * - **A guide opens on its cover** (the prose before its first `##`, plus a card
+ *   per section); picking a section shows that section alone. Paging rather than
+ *   one long scroll because `docs/MCP.md` is 600+ lines, and finding what a tool
+ *   requires meant scrolling blind past five client configurations.
+ * - **Search** (`lib/appInfo/docSearch`) replaces the page with the passages that
+ *   match every word, each opening the page and the heading it sits under.
+ * - **Reading aids**: an "On this page" column that follows the scroll
+ *   (`xl` and up; below it the rail carries those headings), and previous / next
+ *   at the foot of every page.
+ * - **Back to Preferences**: a guide that is also a Preferences section offers to
+ *   open it, the mirror of the "read the guide" button Preferences shows
+ *   (`lib/appInfo/settingsDocs`).
+ *
+ * The page's own `#`/`##` heading is dropped from the body: the page header above
+ * it already says it, and rendering both put the same words on screen twice.
+ * Anchors to that heading still resolve — `locate` finds the section by slug, not
+ * by the heading being drawn.
+ *
+ * The rail is derived from the markdown itself (`lib/appInfo/docOutline`), not
  * from a hand-maintained list — which is also what translates it for free: the
  * Spanish body carries Spanish headings, so `getDocBody` picking the language
- * picks the sidebar's labels too. Adding a section to a doc adds it here with no
+ * picks the rail's labels too. Adding a section to a doc adds it here with no
  * code change.
  *
- * Controlled by `useDocsDialog`. The active doc defaults to the first entry when
- * none is explicitly selected.
+ * Controlled by `useDocsDialog`.
  */
 
-import { BookOpen, ChevronRight, FileText } from "lucide-react";
 import * as React from "react";
 import { useTranslation } from "react-i18next";
-import { DOCS, getDoc, getDocBody } from "@/lib/appInfo/docs";
+import { BookOpen, ExternalLink, FileText, Settings2 } from "lucide-react";
+import { DOCS, getDoc, getDocBody, type DocEntry } from "@/lib/appInfo/docs";
 import { locate, parseDoc, type ParsedDoc } from "@/lib/appInfo/docOutline";
+import { searchDocs, type DocHit } from "@/lib/appInfo/docSearch";
+import { settingsSectionForDoc } from "@/lib/appInfo/settingsDocs";
 import { useDocsDialog } from "@/stores/dialogs/docsDialog";
+import { useSettingsDialog } from "@/components/settings/useSettingsDialog";
 import { Markdown, type DocNavigator } from "@/components/shell/Markdown";
+import { DocsRail } from "@/components/shell/docs/DocsRail";
+import { DocsHome } from "@/components/shell/docs/DocsHome";
+import { DocsSearchResults } from "@/components/shell/docs/DocsSearchResults";
+import { DocsPageHeader } from "@/components/shell/docs/DocsPageHeader";
+import { DocsPager, type PagerTarget } from "@/components/shell/docs/DocsPager";
+import { DocsToc } from "@/components/shell/docs/DocsToc";
+import { docIcon } from "@/components/shell/docs/docIcons";
+import { formatDocDate } from "@/components/shell/docs/formatDocDate";
+import { useScrollSpy } from "@/components/shell/docs/useScrollSpy";
+import { Button } from "@/components/ui/button";
+import { Kbd } from "@/components/ui/kbd";
+import { TreeRow } from "@/components/ui/tree-row";
+import { CONTROL_FOCUS_TIGHT } from "@/components/ui/styles";
+import { useShortcutLabel } from "@/lib/keybindings";
 import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogHeader,
   DialogTitle,
@@ -37,17 +72,6 @@ import {
 /** Where an unregistered doc link goes instead of nowhere. */
 const REPO_BLOB = "https://github.com/Alexfp28/huginnDB/blob/main";
 
-function formatDate(iso: string | null, lang: string): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toLocaleDateString(lang, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
-
 /**
  * The doc a relative markdown href points at, or `null` when nothing in the
  * registry owns it.
@@ -56,12 +80,18 @@ function formatDate(iso: string | null, lang: string): string | null {
  * `./MCP.md` and `docs/MCP.md` all resolve — the docs are written to be read on
  * GitHub from several directories, so all three spellings occur.
  */
-function docForHref(href: string): (typeof DOCS)[number] | null {
+function docForHref(href: string): DocEntry | null {
   const file = href.split("#")[0].split("/").pop()?.toLowerCase();
   if (!file?.endsWith(".md")) return null;
   return (
     DOCS.find((d) => d.path.split("/").pop()?.toLowerCase() === file) ?? null
   );
+}
+
+/** `md` without its first line when that line is a heading of `level`. */
+function withoutHeading(md: string, level: 1 | 2): string {
+  const re = level === 1 ? /^\s*#\s+[^\n]*\n+/ : /^\s*##\s+[^\n]*\n+/;
+  return md.replace(re, "");
 }
 
 export function DocsDialog() {
@@ -70,19 +100,53 @@ export function DocsDialog() {
   const activeId = useDocsDialog((s) => s.activeId);
   const sectionSlug = useDocsDialog((s) => s.sectionSlug);
   const pendingAnchor = useDocsDialog((s) => s.pendingAnchor);
+  const searchFocusRequest = useDocsDialog((s) => s.searchFocusRequest);
   const setOpen = useDocsDialog((s) => s.setOpen);
   const setActive = useDocsDialog((s) => s.setActive);
+  const goHome = useDocsDialog((s) => s.goHome);
   const setSection = useDocsDialog((s) => s.setSection);
   const clearAnchor = useDocsDialog((s) => s.clearAnchor);
+  const findShortcut = useShortcutLabel("focusFilter");
 
-  const active = (activeId && getDoc(activeId)) || DOCS[0];
+  const [query, setQuery] = React.useState("");
+  const searchRef = React.useRef<HTMLInputElement>(null);
+  const [scroller, setScroller] = React.useState<HTMLDivElement | null>(null);
+
+  const active = (activeId && getDoc(activeId)) || null;
   const lang = i18n.language;
   const body = active ? getDocBody(active, lang) : "";
   // Reparsed only when the body changes — a language switch or a different doc,
   // not every render.
-  const parsed = React.useMemo<ParsedDoc>(() => parseDoc(body), [body]);
-  const section = parsed.sections.find((s) => s.slug === sectionSlug) ?? null;
-  const activeDate = active ? formatDate(active.updated, lang) : null;
+  const parsed = React.useMemo<ParsedDoc | null>(
+    () => (active ? parseDoc(body) : null),
+    [active, body],
+  );
+  const section = parsed?.sections.find((s) => s.slug === sectionSlug) ?? null;
+  const searching = query.trim().length > 0;
+  const hits = React.useMemo(
+    () => (searching ? searchDocs(query, lang) : []),
+    [query, searching, lang],
+  );
+
+  // A search left in the box would greet the next opening with a results page
+  // instead of the page the caller asked for (the palette, Preferences).
+  React.useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
+  // The find key while the viewer is open. Select what is there so typing
+  // replaces the last search instead of appending to it.
+  React.useEffect(() => {
+    if (searchFocusRequest === 0) return;
+    searchRef.current?.focus();
+    searchRef.current?.select();
+  }, [searchFocusRequest]);
+
+  const subs = section?.subs ?? [];
+  const spied = useScrollSpy(
+    searching ? null : scroller,
+    React.useMemo(() => subs.map((s) => s.slug), [subs]),
+  );
 
   /**
    * Follow a link the renderer cannot judge alone: an in-document `#anchor`, or
@@ -95,14 +159,14 @@ export function DocsDialog() {
   const navigator = React.useMemo<DocNavigator>(() => {
     const resolve = (href: string): (() => void) | null => {
       if (href.startsWith("#")) {
-        const hit = locate(parsed, href.slice(1));
+        const hit = parsed ? locate(parsed, href.slice(1)) : null;
         return hit ? () => setSection(hit.section, hit.anchor) : null;
       }
       const target = docForHref(href);
       if (target) {
         const anchor = href.split("#")[1];
         return () => {
-          if (target.id === active?.id && anchor) {
+          if (target.id === active?.id && anchor && parsed) {
             const hit = locate(parsed, anchor);
             if (hit) return setSection(hit.section, hit.anchor);
           }
@@ -126,193 +190,272 @@ export function DocsDialog() {
     };
   }, [parsed, active?.id, setSection, setActive]);
 
+  const pickHit = (hit: DocHit) => {
+    setQuery("");
+    useDocsDialog.getState().openTo(hit.docId, hit.section, hit.anchor);
+  };
+
+  /** Previous / next within the guide, spilling into the next guide's cover. */
+  const pager = React.useMemo<{
+    prev: PagerTarget | null;
+    next: PagerTarget | null;
+  }>(() => {
+    if (!active || !parsed) return { prev: null, next: null };
+    const sections = parsed.sections;
+    const at = section ? sections.indexOf(section) : -1;
+    const prevSection = at > 0 ? sections[at - 1] : null;
+    const nextSection = sections[at + 1] ?? null;
+    const nextDoc = DOCS[DOCS.indexOf(active) + 1] ?? null;
+    return {
+      prev: section
+        ? prevSection
+          ? { label: prevSection.title, go: () => setSection(prevSection.slug) }
+          : { label: t(active.titleKey), go: () => setSection(null) }
+        : null,
+      next: nextSection
+        ? { label: nextSection.title, go: () => setSection(nextSection.slug) }
+        : nextDoc
+          ? { label: t(nextDoc.titleKey), go: () => setActive(nextDoc.id) }
+          : null,
+    };
+  }, [active, parsed, section, setSection, setActive, t]);
+
+  const settingsSection = active ? settingsSectionForDoc(active.id) : undefined;
+
+  const actions = active ? (
+    <>
+      {formatDocDate(active.updated, lang) && (
+        <span className="mr-1 text-3xs text-muted-foreground">
+          {t("docs.updated", { date: formatDocDate(active.updated, lang) })}
+        </span>
+      )}
+      {settingsSection && (
+        <Button
+          size="xs"
+          variant="outline"
+          icon={Settings2}
+          onClick={() => {
+            setOpen(false);
+            useSettingsDialog.getState().openAt(settingsSection);
+          }}
+        >
+          {t("docs.openSettings")}
+        </Button>
+      )}
+      <Button
+        size="xs"
+        variant="ghost"
+        icon={ExternalLink}
+        onClick={() => {
+          const localized =
+            lang !== "en" && active.bodies[lang as keyof typeof active.bodies]
+              ? active.path.replace(/\.md$/, `.${lang}.md`)
+              : active.path;
+          void api.openUrl(`${REPO_BLOB}/${localized}`);
+        }}
+      >
+        {t("docs.viewOnGitHub")}
+      </Button>
+    </>
+  ) : undefined;
+
+  const ActiveIcon = active ? docIcon(active.id) : BookOpen;
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent
         tier="workbench"
-        className="flex h-auto max-w-4xl flex-col"
+        className="flex h-[85vh] max-w-6xl flex-col"
+        // Escape clears a search before it closes the dialog, for the reason
+        // Preferences does: typing in the rail's box, the user expects it to
+        // undo the typing rather than lose the whole dialog.
+        onEscapeKeyDown={(e) => {
+          if (query) {
+            e.preventDefault();
+            setQuery("");
+          }
+        }}
       >
         <DialogHeader>
-          <div className="flex items-center gap-2">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-brand/10 text-brand">
-              <BookOpen className="h-4 w-4" />
-            </span>
-            <div className="min-w-0">
-              <DialogTitle>{t("docs.title")}</DialogTitle>
-              <DialogDescription>{t("docs.subtitle")}</DialogDescription>
-            </div>
-          </div>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <BookOpen className="h-4 w-4 text-brand" />
+            {t("docs.title")}
+          </DialogTitle>
+          <DialogDescription className="text-2xs">
+            {t("docs.subtitle")}{" "}
+            {findShortcut && (
+              <>
+                {t("docs.searchWith")}{" "}
+                <Kbd className="px-1 py-0.5 text-3xs">{findShortcut}</Kbd>.
+              </>
+            )}
+          </DialogDescription>
         </DialogHeader>
 
-        <div className="flex h-[70vh] min-h-0">
-          {/* Sidebar: docs, the active one expanded into its sections. */}
-          <nav className="w-60 shrink-0 overflow-y-auto border-r py-1">
-            {DOCS.map((doc) => {
-              const selected = doc.id === active?.id;
-              const date = formatDate(doc.updated, lang);
-              return (
-                <div key={doc.id}>
-                  <button
-                    type="button"
-                    onClick={() => setActive(doc.id)}
-                    aria-current={selected ? "true" : undefined}
-                    className={cn(
-                      "flex w-full items-start gap-2 border-l-2 px-3 py-2 text-left transition-colors",
-                      selected
-                        ? "border-primary bg-accent/40"
-                        : "border-transparent hover:bg-accent",
-                    )}
-                  >
-                    <ChevronRight
-                      aria-hidden
-                      className={cn(
-                        "mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform",
-                        selected && "rotate-90",
-                      )}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm">{t(doc.titleKey)}</span>
-                      {date && (
-                        <span className="block text-3xs text-muted-foreground">
-                          {t("docs.updated", { date })}
-                        </span>
-                      )}
-                    </span>
-                  </button>
+        <DialogBody className="grid grid-cols-[256px_1fr]">
+          <DocsRail
+            query={query}
+            onQuery={setQuery}
+            onSearchEnter={() => hits[0] && pickHit(hits[0])}
+            searchRef={searchRef}
+            activeId={active?.id ?? null}
+            parsed={parsed}
+            sectionSlug={section?.slug ?? null}
+            searching={searching}
+            onHome={() => {
+              setQuery("");
+              goHome();
+            }}
+            onDoc={(id) => {
+              setQuery("");
+              setActive(id);
+            }}
+            onSection={(slug, anchor) => {
+              setQuery("");
+              setSection(slug, anchor);
+            }}
+          />
 
-                  {selected && (
-                    <div className="mb-1">
-                      <SidebarRow
-                        label={t("docs.cover")}
-                        depth={1}
-                        active={sectionSlug === null}
-                        onClick={() => setSection(null)}
-                      />
-                      {parsed.sections.map((s) => (
-                        <React.Fragment key={s.slug}>
-                          <SidebarRow
-                            label={s.title}
-                            depth={1}
-                            active={s.slug === sectionSlug}
-                            onClick={() => setSection(s.slug)}
-                          />
-                          {s.slug === sectionSlug &&
-                            s.subs.map((sub) => (
-                              <SidebarRow
-                                key={sub.slug}
-                                label={sub.title}
-                                depth={2}
-                                active={false}
-                                onClick={() => setSection(s.slug, sub.slug)}
-                              />
-                            ))}
-                        </React.Fragment>
-                      ))}
-                    </div>
+          <main className="flex min-h-0 min-w-0 flex-col">
+            {searching ? (
+              <>
+                <DocsPageHeader
+                  icon={BookOpen}
+                  title={t("docs.search.title", { query: query.trim() })}
+                  description={t("docs.search.count", { count: hits.length })}
+                />
+                <div
+                  key="search"
+                  className="min-h-0 flex-1 overflow-y-auto px-6 pb-6"
+                >
+                  <DocsSearchResults query={query} hits={hits} onPick={pickHit} />
+                </div>
+              </>
+            ) : !active || !parsed ? (
+              <>
+                <DocsPageHeader
+                  icon={BookOpen}
+                  title={t("docs.home")}
+                  description={t("docs.homeIntro")}
+                />
+                <div key="home" className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
+                  {DOCS.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">{t("docs.empty")}</p>
+                  ) : (
+                    <DocsHome
+                      onOpen={(id) => {
+                        setActive(id);
+                      }}
+                    />
                   )}
                 </div>
-              );
-            })}
-          </nav>
-
-          {/* Page. Keyed so switching page mounts fresh — which also resets the
-              scroll offset, something the single-pane version never did. */}
-          <div
-            key={`${active?.id}:${sectionSlug ?? "cover"}`}
-            className="min-w-0 flex-1 overflow-y-auto px-6 py-4"
-          >
-            {!active ? (
-              <p className="text-sm text-muted-foreground">{t("docs.empty")}</p>
-            ) : section ? (
-              <>
-                <ScrollToAnchor
-                  anchor={pendingAnchor}
-                  onConsumed={clearAnchor}
-                />
-                {/* The section's own `##` heading is now the first thing on
-                    the page, and its `mt-6` was sized for a mid-document
-                    heading. */}
-                <Markdown
-                  source={section.body}
-                  navigator={navigator}
-                  className="[&>*:first-child]:mt-0"
-                />
               </>
             ) : (
               <>
-                {activeDate && (
-                  <div className="mb-3 text-2xs uppercase tracking-wide text-muted-foreground">
-                    {t("docs.updated", { date: activeDate })}
-                  </div>
-                )}
-                <Markdown source={parsed.cover} navigator={navigator} />
-                {parsed.sections.length > 0 && (
-                  <>
-                    <h2 className="mb-2 mt-6 border-b pb-1 text-lg font-semibold text-foreground">
-                      {t("docs.coverSections")}
-                    </h2>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      {parsed.sections.map((s) => (
-                        <button
-                          key={s.slug}
-                          type="button"
-                          onClick={() => setSection(s.slug)}
-                          className="flex items-start gap-2 rounded-md border p-3 text-left transition-colors hover:border-brand/60 hover:bg-accent"
+                <DocsPageHeader
+                  icon={ActiveIcon}
+                  eyebrow={
+                    section ? (
+                      <span className="flex items-center gap-1">
+                        {t(`docs.groups.${active.group}`)}
+                        <span aria-hidden>›</span>
+                        <Button
+                          variant="link"
+                          className="h-auto p-0 text-2xs"
+                          onClick={() => setSection(null)}
                         >
-                          <FileText
-                            aria-hidden
-                            className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                          {t(active.titleKey)}
+                        </Button>
+                      </span>
+                    ) : (
+                      t(`docs.groups.${active.group}`)
+                    )
+                  }
+                  title={section ? section.title : t(active.titleKey)}
+                  description={section ? undefined : t(active.descriptionKey)}
+                  actions={actions}
+                />
+
+                <div className="flex min-h-0 min-w-0 flex-1">
+                  {/* Keyed so switching page mounts fresh — which also resets
+                      the scroll offset, something the single-pane version never
+                      did. */}
+                  <div
+                    key={`${active.id}:${section?.slug ?? "cover"}`}
+                    ref={setScroller}
+                    className="min-w-0 flex-1 overflow-y-auto px-6 pb-8"
+                  >
+                    <div className="mx-auto max-w-3xl">
+                      {section ? (
+                        <>
+                          <ScrollToAnchor
+                            anchor={pendingAnchor}
+                            onConsumed={clearAnchor}
                           />
-                          <span className="min-w-0">
-                            <span className="block text-sm font-medium text-foreground">
-                              {s.title}
-                            </span>
-                            {s.subs.length > 0 && (
-                              <span className="mt-0.5 block text-2xs leading-snug text-muted-foreground">
-                                {s.subs.map((x) => x.title).join(" · ")}
-                              </span>
-                            )}
-                          </span>
-                        </button>
-                      ))}
+                          <Markdown
+                            source={withoutHeading(section.body, 2)}
+                            navigator={navigator}
+                            className="[&>*:first-child]:mt-0"
+                          />
+                        </>
+                      ) : (
+                        <>
+                          <Markdown
+                            source={withoutHeading(parsed.cover, 1)}
+                            navigator={navigator}
+                            className="[&>*:first-child]:mt-0"
+                          />
+                          {parsed.sections.length > 0 && (
+                            <>
+                              <h3 className="mb-2 mt-8 border-b pb-1 text-base font-semibold text-foreground">
+                                {t("docs.coverSections")}
+                              </h3>
+                              <div className="grid gap-2 sm:grid-cols-2">
+                                {parsed.sections.map((s) => (
+                                  <TreeRow
+                                    key={s.slug}
+                                    onClick={() => setSection(s.slug)}
+                                    className={cn(
+                                      "items-start gap-2 rounded-md border p-3 text-left transition-colors hover:border-brand/60",
+                                      CONTROL_FOCUS_TIGHT,
+                                    )}
+                                  >
+                                    <FileText
+                                      aria-hidden
+                                      className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                                    />
+                                    <span className="min-w-0">
+                                      <span className="block text-sm font-medium text-foreground">
+                                        {s.title}
+                                      </span>
+                                      {s.subs.length > 0 && (
+                                        <span className="mt-0.5 block text-2xs leading-snug text-muted-foreground">
+                                          {s.subs.map((x) => x.title).join(" · ")}
+                                        </span>
+                                      )}
+                                    </span>
+                                  </TreeRow>
+                                ))}
+                              </div>
+                            </>
+                          )}
+                        </>
+                      )}
+                      <DocsPager prev={pager.prev} next={pager.next} />
                     </div>
-                  </>
-                )}
+                  </div>
+                  <DocsToc
+                    subs={subs}
+                    active={spied}
+                    onPick={(slug) => section && setSection(section.slug, slug)}
+                  />
+                </div>
               </>
             )}
-          </div>
-        </div>
+          </main>
+        </DialogBody>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function SidebarRow({
-  label,
-  depth,
-  active,
-  onClick,
-}: {
-  label: string;
-  depth: 1 | 2;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-current={active ? "true" : undefined}
-      className={cn(
-        "block w-full border-l-2 py-1 pr-3 text-left text-xs transition-colors",
-        depth === 1 ? "pl-8" : "pl-12",
-        active
-          ? "border-primary bg-accent/40 text-foreground"
-          : "border-transparent text-muted-foreground hover:bg-accent hover:text-foreground",
-      )}
-    >
-      {label}
-    </button>
   );
 }
 

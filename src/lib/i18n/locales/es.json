@@ -1701,7 +1701,6 @@
       "claudeCodeLabel": "Claude Code",
       "jsonLabel": "Claude Desktop / otros clientes (JSON)",
       "copied": "Copiado al portapapeles.",
-      "fullGuide": "Guía completa de configuración (Codex, Claude Desktop, flags, herramientas)…",
       "exposureSaveError": "No se pudo guardar qué conexiones están expuestas.",
       "noBinaryHint": "No se encontró el binario del conector, así que no hay nada a lo que apuntar un cliente.",
       "nothingExposedHint": "Todavía no hay ninguna conexión marcada — el conector arrancará sin nada a lo que llegar. Marca una arriba; surte efecto sin reiniciar el cliente de IA.",
@@ -1738,8 +1737,7 @@
       "noConnections": "Aún no hay conexiones guardadas — añade una primero.",
       "enableAll": "Activar todas",
       "disableAll": "Desactivar todas",
-      "enableAllInSection": "Alternar todas las conexiones de {{section}}",
-      "fullGuide": "Guía completa de Pulse…"
+      "enableAllInSection": "Alternar todas las conexiones de {{section}}"
     },
     "about": {
       "tagline": "Explora y gestiona PostgreSQL, MySQL, SQLite, MongoDB y SQL Server desde una sola aplicación.",
@@ -2496,10 +2494,43 @@
     "menuEntry": "Documentación",
     "title": "Documentación",
     "subtitle": "Guías para sacar el máximo partido a HuginnDB.",
+    "searchWith": "Búscalas todas con",
     "updated": "Actualizado {{date}}",
     "cover": "Portada",
     "coverSections": "En esta guía",
     "empty": "No hay documentación disponible.",
+    "home": "Inicio",
+    "homeIntro": "Elige una guía, o busca en el texto de todas desde el cuadro de la izquierda.",
+    "groups": {
+      "start": "Primeros pasos",
+      "databases": "Bases de datos",
+      "integrations": "Integraciones",
+      "organization": "Organización"
+    },
+    "sectionCount_one": "{{count}} sección",
+    "sectionCount_other": "{{count}} secciones",
+    "onThisPage": "En esta página",
+    "pager": "Página anterior y siguiente",
+    "previous": "Anterior",
+    "next": "Siguiente",
+    "openSettings": "Abrir preferencias",
+    "viewOnGitHub": "Ver en GitHub",
+    "readGuide": "Leer la guía",
+    "settingsHeadings": {
+      "connections": "Límites de conexiones",
+      "origins": "Orígenes compartidos"
+    },
+    "search": {
+      "label": "Buscar en la documentación",
+      "placeholder": "Buscar en las guías…",
+      "clear": "Borrar búsqueda",
+      "title": "Resultados de «{{query}}»",
+      "count_one": "{{count}} pasaje encontrado",
+      "count_other": "{{count}} pasajes encontrados",
+      "tooShort": "Sigue escribiendo: una búsqueda necesita al menos {{min}} caracteres.",
+      "none": "Nada en las guías coincide con «{{query}}».",
+      "noneHint": "Cada palabra que escribes tiene que aparecer en la página, así que menos palabras, o distintas, suelen ayudar."
+    },
     "entries": {
       "connections": {
         "title": "Conexiones",

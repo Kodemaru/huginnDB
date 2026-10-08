@@ -40,9 +40,20 @@ import aiEsRaw from "../../../docs/AI.es.md?raw";
 import policyRaw from "../../../docs/POLICY.md?raw";
 import policyEsRaw from "../../../docs/POLICY.es.md?raw";
 
+/**
+ * Which rail heading a doc sits under. Ordered as the viewer draws them, and
+ * deliberately the same four questions Preferences' rail asks ("what do I set
+ * up first", "what is specific to my database", "what else can it do", "who
+ * governs it") so a user moving between the two dialogs finds the same shape.
+ */
+export const DOC_GROUPS = ["start", "databases", "integrations", "organization"] as const;
+export type DocGroup = (typeof DOC_GROUPS)[number];
+
 export interface DocEntry {
   /** Stable id (used as the selected-doc key and React key). */
   id: string;
+  /** The rail heading it is listed under (`docs.groups.<group>`). */
+  group: DocGroup;
   /** i18n key for the sidebar title. */
   titleKey: string;
   /** i18n key for the one-line description under the title. */
@@ -60,10 +71,13 @@ const dates: Record<string, string | undefined> =
 
 // Reading order, not alphabetical: a connection is the first thing anyone needs,
 // the per-driver guides only matter once you have one, and MCP is the optional
-// extra. `DocsDialog` opens on the first entry.
+// extra. Entries of one `group` must stay adjacent — the viewer's rail draws a
+// heading each time the group changes, so a stray entry would split it in two
+// (a test pins this). `DocsDialog` opens on its home page, which lists them all.
 export const DOCS: DocEntry[] = [
   {
     id: "connections",
+    group: "start",
     titleKey: "docs.entries.connections.title",
     descriptionKey: "docs.entries.connections.description",
     path: "docs/CONNECTIONS.md",
@@ -72,6 +86,7 @@ export const DOCS: DocEntry[] = [
   },
   {
     id: "environments",
+    group: "start",
     titleKey: "docs.entries.environments.title",
     descriptionKey: "docs.entries.environments.description",
     path: "docs/ENVIRONMENTS.md",
@@ -79,10 +94,23 @@ export const DOCS: DocEntry[] = [
     updated: dates["docs/ENVIRONMENTS.md"] ?? null,
   },
   {
+    // A keyboard-first tool's key map is part of getting set up, and it applies
+    // to every driver, so it sits with the two "how do I get going" guides
+    // rather than among the per-engine ones.
+    id: "shortcuts",
+    group: "start",
+    titleKey: "docs.entries.shortcuts.title",
+    descriptionKey: "docs.entries.shortcuts.description",
+    path: "docs/SHORTCUTS.md",
+    bodies: { en: shortcutsRaw, es: shortcutsEsRaw },
+    updated: dates["docs/SHORTCUTS.md"] ?? null,
+  },
+  {
     // Cross-driver rather than per-driver, so it sits before the per-engine
     // guides: it applies to any column holding JSON, and `jsonb` on Postgres is
     // where it pays off as much as anywhere.
     id: "jsonSchemas",
+    group: "databases",
     titleKey: "docs.entries.jsonSchemas.title",
     descriptionKey: "docs.entries.jsonSchemas.description",
     path: "docs/JSON_SCHEMAS.md",
@@ -91,6 +119,7 @@ export const DOCS: DocEntry[] = [
   },
   {
     id: "mongodb",
+    group: "databases",
     titleKey: "docs.entries.mongodb.title",
     descriptionKey: "docs.entries.mongodb.description",
     path: "docs/MONGODB.md",
@@ -99,6 +128,7 @@ export const DOCS: DocEntry[] = [
   },
   {
     id: "sqlserver",
+    group: "databases",
     titleKey: "docs.entries.sqlserver.title",
     descriptionKey: "docs.entries.sqlserver.description",
     path: "docs/SQL_SERVER.md",
@@ -106,21 +136,11 @@ export const DOCS: DocEntry[] = [
     updated: dates["docs/SQL_SERVER.md"] ?? null,
   },
   {
-    // Before the per-driver guides would be wrong (it applies to all of them)
-    // and after MCP would bury it; a keyboard-first tool's key map belongs
-    // right after the two "how do I get set up" guides.
-    id: "shortcuts",
-    titleKey: "docs.entries.shortcuts.title",
-    descriptionKey: "docs.entries.shortcuts.description",
-    path: "docs/SHORTCUTS.md",
-    bodies: { en: shortcutsRaw, es: shortcutsEsRaw },
-    updated: dates["docs/SHORTCUTS.md"] ?? null,
-  },
-  {
     // Right before MCP: MCP's own tools table sends the reader here for what
     // `pulse_metrics` and friends actually answer, so the feature guide
     // belongs immediately ahead of the connector that also exposes it.
     id: "pulse",
+    group: "integrations",
     titleKey: "docs.entries.pulse.title",
     descriptionKey: "docs.entries.pulse.description",
     path: "docs/PULSE.md",
@@ -129,6 +149,7 @@ export const DOCS: DocEntry[] = [
   },
   {
     id: "mcp",
+    group: "integrations",
     titleKey: "docs.entries.mcp.title",
     descriptionKey: "docs.entries.mcp.description",
     path: "docs/MCP.md",
@@ -142,6 +163,7 @@ export const DOCS: DocEntry[] = [
     // Codex licence back to the connector. A reader who arrives at one should
     // find the other next to it.
     id: "ai",
+    group: "integrations",
     titleKey: "docs.entries.ai.title",
     descriptionKey: "docs.entries.ai.description",
     path: "docs/AI.md",
@@ -153,6 +175,7 @@ export const DOCS: DocEntry[] = [
     // the two entries above let an AI do, and it is written for the
     // administrator rather than for the person using the panel.
     id: "policy",
+    group: "organization",
     titleKey: "docs.entries.policy.title",
     descriptionKey: "docs.entries.policy.description",
     path: "docs/POLICY.md",
@@ -190,4 +213,9 @@ export function docLocation(
   const doc = getDoc(id);
   if (!doc) return null;
   return locate(parseDoc(getDocBody(doc, lang)), slugify(heading));
+}
+
+/** The docs of one group, in reading order. */
+export function docsInGroup(group: DocGroup): DocEntry[] {
+  return DOCS.filter((d) => d.group === group);
 }

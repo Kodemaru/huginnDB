@@ -233,7 +233,6 @@ describe("raw <button> outside ui/", () => {
     // The close cross is measured by dockview's overflow logic; the other two
     // are colour swatches inside context-menu content.
     "src/components/shell/WorkspaceTab.tsx": 3,
-    "src/components/shell/dialogs/DocsDialog.tsx": 3,
     "src/components/connection/ConnectionRailSection.tsx": 2,
     "src/components/connection/StatusConnections.tsx": 2,
     "src/components/pulse/PulseWindow.tsx": 2,
@@ -273,7 +272,7 @@ describe("raw <button> outside ui/", () => {
     "src/components/shell/dialogs/WhatsNewDialog.tsx": 1,
   };
 
-  it(`is down to ${69} in ${41} files`, () => {
+  it(`is down to ${66} in ${40} files`, () => {
     const measured = census(
       (src) => (src.match(/<button[\s/>]/g) || []).length,
     );
@@ -281,7 +280,7 @@ describe("raw <button> outside ui/", () => {
   });
 
   it("headline count only moves down", () => {
-    expect(total(BUDGET)).toBeLessThanOrEqual(69);
+    expect(total(BUDGET)).toBeLessThanOrEqual(66);
   });
 });
 

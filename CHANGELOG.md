@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **The documentation viewer is rebuilt to match Preferences.**
+  - It is now as large as Preferences, with the same layout: a left rail with
+    its own search box, guides grouped under *Getting started*, *Databases*,
+    *Integrations* and *Organization*, and a header on every page.
+  - It opens on a **home page** with a card per guide saying what it is for,
+    instead of dropping you into the first guide.
+  - **Search the text of every guide** from the rail (`Ctrl+F` while the
+    viewer is open). Each result shows the passage with your words marked, and
+    opens the page and the heading it sits under.
+  - An **On this page** column follows your scrolling and jumps to a heading;
+    on narrower windows those headings stay in the rail. **Previous / Next**
+    buttons at the foot of every page carry on reading, into the next guide
+    when one ends.
+  - A guide that is also a Preferences section has an **Open settings** button,
+    and there is a **View on GitHub** button for the guide's source.
+- **Every Preferences section that has a guide now has a "Read the guide"
+  button** in its header: Connections, Shortcuts, JSON Schemas, Shared origins,
+  MCP, Pulse, AI and Managed policy. Connections and Shared origins open the
+  guide on the part that explains that section. The two text links that MCP and
+  Pulse had at the foot of their pages are replaced by it.
+
 - **Settings → Connections shows how many connections are actually open.**
   - Each server now reads, for example, `2 open · 7 of 10 reserved`. Before, it
     showed only the reserved number, and that number is not what the server

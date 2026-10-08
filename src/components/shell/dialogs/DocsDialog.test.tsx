@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@/lib/i18n";
 import { DocsDialog } from "./DocsDialog";
 import { useDocsDialog } from "@/stores/dialogs/docsDialog";
+import { useSettingsDialog } from "@/components/settings/useSettingsDialog";
 
 // The only Tauri surface this dialog touches: opening an external URL.
 const openUrl = vi.fn<(url: string) => Promise<void>>();
@@ -50,13 +51,14 @@ afterEach(() => {
   useDocsDialog.setState({ open: false, activeId: null, sectionSlug: null });
 });
 
-/** The scrollable page, i.e. everything that is not the sidebar. */
+/** The page pane, i.e. everything that is not the rail. */
 function page(): HTMLElement {
-  const nav = document.querySelector("nav")!;
-  const pane = nav.parentElement!.querySelector<HTMLElement>(
-    ":scope > div:not(nav)",
-  );
-  return pane!;
+  return document.querySelector<HTMLElement>("main")!;
+}
+
+/** The rail's own navigation (the dialog also has "On this page" and a pager). */
+function rail(): HTMLElement {
+  return document.querySelector<HTMLElement>("aside nav")!;
 }
 
 describe("DocsDialog", () => {
@@ -64,7 +66,7 @@ describe("DocsDialog", () => {
     render(<DocsDialog />);
     // The cover is the prose before the first `##` plus a card per section.
     expect(
-      await screen.findByRole("heading", { name: /MCP connector/i, level: 1 }),
+      await screen.findByRole("heading", { name: /MCP connector/i, level: 2 }),
     ).toBeTruthy();
     expect(screen.getByText("In this guide")).toBeTruthy();
     // Cards for the sections, and *not* their content.
@@ -75,8 +77,7 @@ describe("DocsDialog", () => {
   it("shows one section at a time", async () => {
     render(<DocsDialog />);
 
-    const nav = document.querySelector("nav")!;
-    fireEvent.click(within(nav).getByRole("button", { name: "Tools" }));
+    fireEvent.click(within(rail()).getByRole("button", { name: "Tools" }));
 
     const text = page().textContent ?? "";
     // The reason this feature exists: the tools table, without scrolling past
@@ -160,11 +161,105 @@ describe("DocsDialog", () => {
     useDocsDialog.setState({ sectionSlug: "security" });
     render(<DocsDialog />);
 
-    const nav = document.querySelector("nav")!;
-    fireEvent.click(within(nav).getByRole("button", { name: /SQL Server/ }));
+    fireEvent.click(within(rail()).getByRole("button", { name: /SQL Server/ }));
 
     // A section slug from the previous doc means nothing in the new one, and
     // keeping it would highlight a sidebar row that does not exist.
     expect(useDocsDialog.getState().sectionSlug).toBeNull();
+  });
+
+  it("opens on a home page listing every guide under its group", () => {
+    useDocsDialog.setState({ activeId: null, sectionSlug: null });
+    render(<DocsDialog />);
+
+    const main = within(page());
+    for (const group of [
+      "Getting started",
+      "Databases",
+      "Integrations",
+      "Organization",
+    ]) {
+      expect(main.getByRole("heading", { name: group })).toBeTruthy();
+    }
+    // A card per guide, each carrying the one-line description.
+    expect(main.getByRole("button", { name: /MCP connector/ })).toBeTruthy();
+    expect(main.getByText("Connect AI tools to your databases")).toBeTruthy();
+
+    fireEvent.click(main.getByRole("button", { name: /Pulse/ }));
+    expect(useDocsDialog.getState().activeId).toBe("pulse");
+  });
+
+  it("searches the text of every guide and opens the heading it sits under", async () => {
+    useDocsDialog.setState({ activeId: null, sectionSlug: null });
+    render(<DocsDialog />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search the documentation" }), {
+      target: { value: "save_view" },
+    });
+
+    // `save_view` is only ever named in the MCP guide's tools table.
+    const results = within(page());
+    const row = await results.findByRole("button", { name: /Tools/ });
+    fireEvent.click(row);
+
+    const s = useDocsDialog.getState();
+    expect(s.activeId).toBe("mcp");
+    expect(s.sectionSlug).toBe("tools");
+    // The search box is emptied, so the next opening is not a stale result page.
+    expect(
+      (screen.getByRole("textbox", { name: "Search the documentation" }) as HTMLInputElement)
+        .value,
+    ).toBe("");
+  });
+
+  it("says so when nothing matches, rather than showing an empty list", () => {
+    render(<DocsDialog />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search the documentation" }), {
+      target: { value: "zzzqqqxx" },
+    });
+    expect(within(page()).getByText(/Nothing in the guides matches/)).toBeTruthy();
+  });
+
+  it("pages through a guide with previous and next", () => {
+    render(<DocsDialog />);
+
+    // The cover has nothing before it; its next page is the first section.
+    const pager = () => within(screen.getByRole("navigation", { name: "Previous and next page" }));
+    expect(pager().queryByRole("button", { name: /Previous/ })).toBeNull();
+    fireEvent.click(pager().getByRole("button", { name: /Next/ }));
+    const first = useDocsDialog.getState().sectionSlug;
+    expect(first).not.toBeNull();
+
+    // And back again lands on the cover.
+    fireEvent.click(pager().getByRole("button", { name: /Previous/ }));
+    expect(useDocsDialog.getState().sectionSlug).toBeNull();
+  });
+
+  it("lists a section's ### headings in the 'On this page' column", () => {
+    useDocsDialog.setState({ sectionSlug: "security" });
+    render(<DocsDialog />);
+
+    const toc = within(screen.getByRole("navigation", { name: "On this page" }));
+    fireEvent.click(toc.getByRole("button", { name: /When the client blocks the call/i }));
+
+    expect(useDocsDialog.getState().sectionSlug).toBe("security");
+    expect(useDocsDialog.getState().pendingAnchor).not.toBeNull();
+  });
+
+  it("offers to open the Preferences section a guide is about", () => {
+    useSettingsDialog.setState({ open: false });
+    render(<DocsDialog />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    expect(useDocsDialog.getState().open).toBe(false);
+    expect(useSettingsDialog.getState().open).toBe(true);
+    expect(useSettingsDialog.getState().section).toBe("mcp");
+  });
+
+  it("does not offer Preferences for a guide that has no section", () => {
+    useDocsDialog.setState({ activeId: "mongodb" });
+    render(<DocsDialog />);
+    expect(screen.queryByRole("button", { name: "Open settings" })).toBeNull();
   });
 });
