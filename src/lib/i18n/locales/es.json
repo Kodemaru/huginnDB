@@ -2583,6 +2583,35 @@
     "readMore": "Leer más",
     "readLess": "Leer menos",
     "releases": {
+      "1_32_0": {
+        "tagline": "El visor de documentación se rehace con búsqueda, las conexiones aguantan mejor los límites del servidor, los túneles SSH se reconectan solos y el conector MCP ya no se para al cerrar HuginnDB.",
+        "items": {
+          "documentationViewer": {
+            "title": "El visor de documentación se parece a Preferencias",
+            "body": "Abre en una página de inicio, busca en el texto de todas las guías, sigue tu lectura con una columna En esta página y continúa con Anterior / Siguiente. Cada sección de Preferencias con guía tiene ahora un botón Leer la guía."
+          },
+          "connectionCounts": {
+            "title": "Mira cuántas conexiones hay realmente abiertas",
+            "body": "Ajustes → Conexiones muestra abiertas frente a reservadas por servidor, y una segunda conexión al mismo servidor reserva ahora la mitad de lo que queda en vez de cinco, así que caben tres perfiles donde antes dos. Al llegar al límite se cierran vistas de base de datos sin uso antes de rechazar nada."
+          },
+          "tunnelsReconnect": {
+            "title": "Los túneles SSH y las conexiones perdidas se recuperan solos",
+            "body": "Los túneles envían su propio keepalive y se reconectan la próxima vez que se usan. Una conexión perdida se reintenta dos veces antes de avisar y el aviso desaparece cuando vuelve a responder. Una consulta tras una pausa larga ya no espera 30 segundos ni culpa al servidor."
+          },
+          "disconnectAndClose": {
+            "title": "Desconectar es inmediato y no queda nada abierto",
+            "body": "El árbol, las pestañas y las demás ventanas se actualizan al instante mientras la conexión se cierra en segundo plano. Cerrar una ventana o salir de HuginnDB cierra ahora sus conexiones como es debido, y la misma conexión nunca se abre dos veces a la vez."
+          },
+          "mcpFallback": {
+            "title": "El conector MCP sobrevive a un HuginnDB cerrado",
+            "body": "Con el puente activado, el conector recurre a sus propias conexiones cuando la app está cerrada, sigue buscándola para volver a usarla y se reconecta antes de la primera petición tras un reinicio en lugar de fallarla."
+          },
+          "schemaTree": {
+            "title": "Un árbol de esquema que dice lo que está haciendo",
+            "body": "Filas de relleno y un spinner mientras carga una base de datos, un botón Reintentar ante una lectura fallida en lugar de reintentos infinitos, y colecciones de MongoDB que aparecen al instante por SSH, con recuentos y tamaños rellenándose después."
+          }
+        }
+      },
       "1_31_0": {
         "tagline": "Trabaja en dos entornos a la vez, eliminar una fila te dice por qué se rechazó, y un script de MongoDB con una llamada por línea ejecuta por fin todas las llamadas.",
         "items": {

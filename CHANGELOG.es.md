@@ -8,6 +8,8 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ## [Sin publicar]
 
+## [1.32.0] — 2026-10-08
+
 ### Añadido
 
 - **El visor de documentación se rehace para encajar con Ajustes.**

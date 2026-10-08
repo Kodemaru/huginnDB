@@ -2583,6 +2583,35 @@
     "readMore": "Read more",
     "readLess": "Read less",
     "releases": {
+      "1_32_0": {
+        "tagline": "The documentation viewer is rebuilt with search, connections hold up better against server limits, SSH tunnels reconnect on their own, and the MCP connector no longer stops when HuginnDB is closed.",
+        "items": {
+          "documentationViewer": {
+            "title": "The documentation viewer matches Preferences",
+            "body": "It opens on a home page, searches the text of every guide, follows your reading with an On this page column and carries on with Previous / Next. Each Preferences section with a guide now has a Read the guide button."
+          },
+          "connectionCounts": {
+            "title": "See how many connections are really open",
+            "body": "Settings → Connections shows open against reserved for each server, and a second connection to the same server now reserves half of what is left instead of five, so three profiles fit where two did. At the limit, unused database views are closed before anything is refused."
+          },
+          "tunnelsReconnect": {
+            "title": "SSH tunnels and lost connections recover by themselves",
+            "body": "Tunnels send their own keepalive and reconnect the next time they are used. A lost connection is retried twice before alerting and its warning clears when it answers again. A query after a long pause no longer waits 30 seconds and blames the server."
+          },
+          "disconnectAndClose": {
+            "title": "Disconnecting is immediate and nothing is left open",
+            "body": "The tree, tabs and other windows update at once while the connection closes in the background. Closing a window or quitting HuginnDB now closes its connections properly, and the same connection is never opened twice at once."
+          },
+          "mcpFallback": {
+            "title": "The MCP connector survives a closed HuginnDB",
+            "body": "With the bridge on, the connector falls back to its own connections when the app is closed, keeps looking for the app to switch back, and reconnects before the first request after a restart instead of failing it."
+          },
+          "schemaTree": {
+            "title": "A schema tree that tells you what it is doing",
+            "body": "Placeholder rows and a spinner while a database loads, a Retry button on a failed read instead of endless retries, and MongoDB collections that appear straight away over SSH, with counts and sizes filling in after."
+          }
+        }
+      },
       "1_31_0": {
         "tagline": "Work in two environments at once, deleting a row tells you why it was refused, and a MongoDB script with one call per line finally runs every call.",
         "items": {

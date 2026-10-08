@@ -101,6 +101,43 @@ export interface ReleaseNote {
  */
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "1.32.0",
+    major: true,
+    taglineKey: "whatsNew.releases.1_32_0.tagline",
+    highlights: [
+      {
+        icon: BookOpen,
+        titleKey: "whatsNew.releases.1_32_0.items.documentationViewer.title",
+        bodyKey: "whatsNew.releases.1_32_0.items.documentationViewer.body",
+      },
+      {
+        icon: Gauge,
+        titleKey: "whatsNew.releases.1_32_0.items.connectionCounts.title",
+        bodyKey: "whatsNew.releases.1_32_0.items.connectionCounts.body",
+      },
+      {
+        icon: RefreshCw,
+        titleKey: "whatsNew.releases.1_32_0.items.tunnelsReconnect.title",
+        bodyKey: "whatsNew.releases.1_32_0.items.tunnelsReconnect.body",
+      },
+      {
+        icon: Power,
+        titleKey: "whatsNew.releases.1_32_0.items.disconnectAndClose.title",
+        bodyKey: "whatsNew.releases.1_32_0.items.disconnectAndClose.body",
+      },
+      {
+        icon: Plug,
+        titleKey: "whatsNew.releases.1_32_0.items.mcpFallback.title",
+        bodyKey: "whatsNew.releases.1_32_0.items.mcpFallback.body",
+      },
+      {
+        icon: ListTree,
+        titleKey: "whatsNew.releases.1_32_0.items.schemaTree.title",
+        bodyKey: "whatsNew.releases.1_32_0.items.schemaTree.body",
+      },
+    ],
+  },
+  {
     version: "1.31.0",
     major: true,
     taglineKey: "whatsNew.releases.1_31_0.tagline",
