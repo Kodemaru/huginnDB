@@ -10,6 +10,29 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el p
 
 ### Añadido
 
+- **El visor de documentación se rehace para encajar con Ajustes.**
+  - Ahora es tan grande como Ajustes y tiene el mismo diseño: un rail a la
+    izquierda con su propio buscador, las guías agrupadas en *Primeros pasos*,
+    *Bases de datos*, *Integraciones* y *Organización*, y una cabecera en cada
+    página.
+  - Se abre en una **página de inicio** con una tarjeta por guía que dice para
+    qué sirve, en vez de dejarte dentro de la primera guía.
+  - **Busca en el texto de todas las guías** desde el rail (`Ctrl+F` con el
+    visor abierto). Cada resultado muestra el pasaje con tus palabras marcadas
+    y abre la página y el encabezado donde está.
+  - Una columna **En esta página** sigue tu desplazamiento y salta a un
+    encabezado; en ventanas más estrechas esos encabezados se quedan en el
+    rail. Los botones **Anterior / Siguiente** al pie de cada página siguen la
+    lectura, y pasan a la guía siguiente cuando una termina.
+  - Una guía que también es una sección de Ajustes tiene un botón **Abrir
+    ajustes**, y hay un botón **Ver en GitHub** con el código fuente de la guía.
+- **Cada sección de Ajustes que tiene guía ahora tiene un botón "Leer la
+  guía"** en su cabecera: Conexiones, Atajos, Esquemas JSON, Orígenes
+  compartidos, MCP, Pulse, IA y Política gestionada. Conexiones y Orígenes
+  compartidos abren la guía en la parte que explica esa sección. Los dos
+  enlaces de texto que MCP y Pulse tenían al pie de su página quedan
+  sustituidos por él.
+
 - **Ajustes → Conexiones muestra cuántas conexiones hay abiertas de verdad.**
   - Cada servidor indica ahora, por ejemplo, `2 abiertas · 7 de 10 reservadas`.
     Antes solo aparecía el número de reservadas, y ese no es el que ve el

@@ -17,7 +17,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/tauri";
@@ -34,8 +33,6 @@ import {
   usePreferences,
   selectPulsePrefs,
 } from "@/stores/preferences/preferences";
-import { useSettingsDialog } from "@/components/settings/useSettingsDialog";
-import { useDocsDialog } from "@/stores/dialogs/docsDialog";
 import type { ConnectionProfile } from "@/types";
 import { ConnectionTreeCard } from "./ConnectionTreeCard";
 import { PrefGroup } from "./PrefGroup";
@@ -248,19 +245,6 @@ export function PulseSection() {
           searching={filter.trim().length > 0}
         />
       </ConnectionTreeCard>
-
-      <Button
-        type="button"
-        variant="link"
-        size="sm"
-        className="h-auto p-0 text-xs"
-        onClick={() => {
-          useSettingsDialog.getState().setOpen(false);
-          useDocsDialog.getState().openTo("pulse");
-        }}
-      >
-        {t("settings.pulse.fullGuide")}
-      </Button>
     </div>
   );
 }

@@ -1701,7 +1701,6 @@
       "claudeCodeLabel": "Claude Code",
       "jsonLabel": "Claude Desktop / other clients (JSON)",
       "copied": "Copied to clipboard.",
-      "fullGuide": "Full setup guide (Codex, Claude Desktop, flags, tools)…",
       "exposureSaveError": "Couldn't save which connections are exposed.",
       "noBinaryHint": "The connector binary wasn't found, so there's nothing to point a client at.",
       "nothingExposedHint": "No connections are ticked yet — the connector will start with nothing to reach. Tick one above; it takes effect without restarting the AI client.",
@@ -1738,8 +1737,7 @@
       "noConnections": "No saved connections yet — add one first.",
       "enableAll": "Enable all",
       "disableAll": "Disable all",
-      "enableAllInSection": "Toggle every connection in {{section}}",
-      "fullGuide": "Full guide to Pulse…"
+      "enableAllInSection": "Toggle every connection in {{section}}"
     },
     "about": {
       "tagline": "Minimal desktop database manager for PostgreSQL, MySQL and SQLite.",
@@ -2496,10 +2494,43 @@
     "menuEntry": "Documentation",
     "title": "Documentation",
     "subtitle": "Guides for getting the most out of HuginnDB.",
+    "searchWith": "Search them all with",
     "updated": "Updated {{date}}",
     "cover": "Overview",
     "coverSections": "In this guide",
     "empty": "No documentation is available.",
+    "home": "Home",
+    "homeIntro": "Pick a guide, or search the text of all of them from the box on the left.",
+    "groups": {
+      "start": "Getting started",
+      "databases": "Databases",
+      "integrations": "Integrations",
+      "organization": "Organization"
+    },
+    "sectionCount_one": "{{count}} section",
+    "sectionCount_other": "{{count}} sections",
+    "onThisPage": "On this page",
+    "pager": "Previous and next page",
+    "previous": "Previous",
+    "next": "Next",
+    "openSettings": "Open settings",
+    "viewOnGitHub": "View on GitHub",
+    "readGuide": "Read the guide",
+    "settingsHeadings": {
+      "connections": "Connection limits",
+      "origins": "Shared origins"
+    },
+    "search": {
+      "label": "Search the documentation",
+      "placeholder": "Search the guides…",
+      "clear": "Clear search",
+      "title": "Results for “{{query}}”",
+      "count_one": "{{count}} passage found",
+      "count_other": "{{count}} passages found",
+      "tooShort": "Keep typing — a search needs at least {{min}} characters.",
+      "none": "Nothing in the guides matches “{{query}}”.",
+      "noneHint": "Every word you type has to appear on the page, so fewer or different words usually help."
+    },
     "entries": {
       "connections": {
         "title": "Connections",

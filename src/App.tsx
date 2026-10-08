@@ -47,6 +47,7 @@ import { useSessionPanelLayout } from "@/stores/session/panelLayout";
 import { useTreeSearch } from "@/stores/session/treeSearch";
 import { startFocusFollowsTab } from "@/stores/session/focusFollowsTab";
 import { useSettingsDialog } from "@/components/settings/useSettingsDialog";
+import { useDocsDialog } from "@/stores/dialogs/docsDialog";
 import { useTranslation } from "react-i18next";
 import { setLanguage } from "@/lib/i18n";
 import { FileMenu } from "@/components/menus/FileMenu";
@@ -430,6 +431,10 @@ export default function App() {
         if (focused?.closest(".monaco-editor")) return false;
         if (useSettingsDialog.getState().open) {
           useSettingsDialog.getState().requestSearchFocus();
+          return;
+        }
+        if (useDocsDialog.getState().open) {
+          useDocsDialog.getState().requestSearchFocus();
           return;
         }
         // Any other modal holds a focus trap: the filter behind it could not
